@@ -35,15 +35,21 @@ const safeUser = safeAuthUser;
 function frontendOrigin() { return process.env.CLIENT_ORIGIN || 'http://localhost:5173'; }
 function smtpReady() { return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS); }
 function mailer() { return nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||587),secure:process.env.SMTP_SECURE==='true',auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}}); }
-async function sendMail(to, subject, text) {
- if(!smtpReady()) return false;
+async function sendMail(to, subject, text, html) {
+ if(!smtpReady()) throw new Error('Email delivery is not configured. Add SMTP_HOST, SMTP_USER and SMTP_PASS to server/.env.');
  try {
-  await mailer().sendMail({from:process.env.MAIL_FROM||process.env.SMTP_USER,to,subject,text});
-  return true;
+  await mailer().sendMail({from:process.env.MAIL_FROM||process.env.SMTP_USER,to,subject,text,html});
  } catch(e) {
   console.error('Email delivery failed', e);
-  throw new Error('Email delivery failed. Check the SMTP configuration and server logs.');
+  throw new Error('Email delivery failed. Check your SMTP settings, app password and server logs.');
  }
+}
+function verificationEmail(link) {
+ return {
+  subject: 'Welcome to Learny - verify your email',
+  text: `Welcome to Learny!\n\nThanks for joining. Please verify your email by opening this link:\n${link}\n\nThis link expires in 24 hours.`,
+  html: `<div style="margin:0;background:#f5f3ff;padding:40px 16px;font-family:Arial,sans-serif;color:#211b3d"><div style="max-width:560px;margin:auto;background:#fff;border-radius:18px;padding:36px;box-shadow:0 8px 30px rgba(43,27,91,.12)"><div style="font-size:24px;font-weight:700;color:#6d28d9">Learny</div><h1 style="font-size:28px;margin:28px 0 12px">Welcome to your learning journey!</h1><p style="font-size:16px;line-height:1.6;color:#5b5570">Thanks for creating your Learny account. Confirm your email to unlock your courses, practice lab and projects.</p><p style="text-align:center;margin:30px 0"><a href="${link}" style="display:inline-block;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;padding:14px 24px;font-weight:700">Verify my email</a></p><p style="font-size:13px;line-height:1.5;color:#77718b">This secure link expires in 24 hours. If you did not create a Learny account, you can safely ignore this message.</p></div></div>`
+ };
 }
 function requireSameOrigin(req,res,next) { const origin=req.get('origin'); if(origin && origin !== frontendOrigin()) return res.status(403).json({error:'Cross-site request blocked'}); next(); }
 function cleanupAuthTokens(){ db.prepare("DELETE FROM auth_tokens WHERE expires_at <= CURRENT_TIMESTAMP OR used_at IS NOT NULL").run(); }
@@ -68,12 +74,17 @@ app.post('/api/auth/register', authLimiter, requireSameOrigin, async (req,res)=>
   if(!verified){
    const token=createEmailVerificationToken(row.id);
    const link=`${frontendOrigin()}/verify-email?token=${encodeURIComponent(token)}`;
-   await sendMail(row.email,'Verify your Learny email',`Welcome to Learny!\n\nVerify your email:\n${link}\n\nThis link expires in 24 hours.`);
+   const email=verificationEmail(link);
+   await sendMail(row.email,email.subject,email.text,email.html);
    return res.status(201).json({requiresVerification:true});
   }
   const session=createSession(row.id); setAuthCookie(res,session);
   res.status(201).json({user:safeUser(row)});
- } catch(e) { console.error('Register error',e); res.status(500).json({error:'Could not create account'}); }
+ } catch(e) {
+  console.error('Register error',e);
+  const emailError=e.message?.startsWith('Email delivery') || e.message?.startsWith('Email delivery is not configured');
+  res.status(emailError?503:500).json({error:emailError?e.message:'Could not create account'});
+ }
 });
 app.post('/api/auth/login', authLimiter, requireSameOrigin, async (req,res)=>{
  const parsed=loginSchema.safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Invalid login details'});
@@ -105,7 +116,12 @@ app.post('/api/auth/resend-verification', authLimiter, requireSameOrigin, async 
   db.prepare("UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE user_id=? AND type='verify_email' AND used_at IS NULL").run(user.id);
   const token=createEmailVerificationToken(user.id);
   const link=`${frontendOrigin()}/verify-email?token=${encodeURIComponent(token)}`;
-  await sendMail(user.email,'Verify your Learny email',`Verify your email:\n${link}\n\nThis link expires in 24 hours.`);
+  const email=verificationEmail(link);
+  try {
+   await sendMail(user.email,email.subject,email.text,email.html);
+  } catch (error) {
+   return res.status(503).json({error:error.message});
+  }
  }
  res.json({ok:true,message:'If that account needs verification, a new email has been sent.'});
 });
