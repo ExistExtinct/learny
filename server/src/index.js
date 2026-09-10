@@ -55,7 +55,7 @@ app.post('/api/auth/register', authLimiter, requireSameOrigin, async (req,res)=>
  const parsed=registerSchema.safeParse(req.body);
  if(!parsed.success) return res.status(400).json({error:'Use a valid username, email, display name and an 8–72 character password.'});
  const {username,email,password,displayName}=parsed.data;
- if(process.env.EMAIL_VERIFICATION_REQUIRED === 'true' && isProd && !smtpReady()) return res.status(503).json({error:'Email verification is enabled but SMTP is not configured.'});
+ if(process.env.EMAIL_VERIFICATION_REQUIRED === 'true' && !smtpReady()) return res.status(503).json({error:'Email verification is enabled but SMTP is not configured.'});
  try {
   const exists=db.prepare('SELECT id,username,email FROM users WHERE username=? OR email=?').get(username,email);
   if(exists) return res.status(409).json({error:'Username or email is already registered'});
@@ -68,11 +68,7 @@ app.post('/api/auth/register', authLimiter, requireSameOrigin, async (req,res)=>
   if(!verified){
    const token=createEmailVerificationToken(row.id);
    const link=`${frontendOrigin()}/verify-email?token=${encodeURIComponent(token)}`;
-   let sent=false;
-   try { sent=await sendMail(row.email,'Verify your Learny email',`Welcome to Learny!\n\nVerify your email:\n${link}\n\nThis link expires in 24 hours.`); }
-   catch(e) { if(isProd) return res.status(503).json({error:e.message}); }
-   if(!sent && isProd) return res.status(503).json({error:'Email delivery is not configured. Please contact the administrator.'});
-   if(!sent) return res.status(201).json({requiresVerification:true,devVerificationUrl:link});
+   await sendMail(row.email,'Verify your Learny email',`Welcome to Learny!\n\nVerify your email:\n${link}\n\nThis link expires in 24 hours.`);
    return res.status(201).json({requiresVerification:true});
   }
   const session=createSession(row.id); setAuthCookie(res,session);
@@ -109,10 +105,7 @@ app.post('/api/auth/resend-verification', authLimiter, requireSameOrigin, async 
   db.prepare("UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE user_id=? AND type='verify_email' AND used_at IS NULL").run(user.id);
   const token=createEmailVerificationToken(user.id);
   const link=`${frontendOrigin()}/verify-email?token=${encodeURIComponent(token)}`;
-  let sent=false;
-  try { sent=await sendMail(user.email,'Verify your Learny email',`Verify your email:\n${link}\n\nThis link expires in 24 hours.`); }
-  catch(e) { if(isProd) return res.status(503).json({error:e.message}); }
-  if(!sent) return res.json({ok:true,devVerificationUrl:link,message:'SMTP is not configured. Use the development verification link.'});
+  await sendMail(user.email,'Verify your Learny email',`Verify your email:\n${link}\n\nThis link expires in 24 hours.`);
  }
  res.json({ok:true,message:'If that account needs verification, a new email has been sent.'});
 });
@@ -124,9 +117,7 @@ app.post('/api/auth/forgot-password', authLimiter, requireSameOrigin, async (req
   db.prepare("UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE user_id=? AND type='reset_password' AND used_at IS NULL").run(user.id);
   const token=createPasswordResetToken(user.id);
   const link=`${frontendOrigin()}/reset-password?token=${encodeURIComponent(token)}`;
-  const sent=await sendMail(user.email,'Reset your Learny password',`Reset your password:\n${link}\n\nThis link expires in 1 hour. If you did not request it, ignore this email.`);
-  if(!sent && isProd) return res.status(503).json({error:'Password reset email is not configured.'});
-  if(!sent && !isProd) return res.json({ok:true,devResetUrl:link});
+  await sendMail(user.email,'Reset your Learny password',`Reset your password:\n${link}\n\nThis link expires in 1 hour. If you did not request it, ignore this email.`);
  }
  res.json({ok:true,message:'If an account exists for that email, reset instructions have been sent.'});
 });

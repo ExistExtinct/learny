@@ -165,8 +165,13 @@ function seed() {
  const challenges = [
   ['javascript','Sum an Array','Return the sum of all numbers in an array.','const numbers = [2, 4, 6, 8];\n\nfunction sumArray(arr) {\n  // your code\n}\n\nconsole.log(sumArray(numbers));','20','Easy'],
   ['javascript','Count Vowels','Count vowels in a string.','function countVowels(text) {\n  // your code\n}\n\nconsole.log(countVowels("Learn JavaScript"));','5','Easy'],
+  ['javascript','Reverse a String','Return the characters of a string in reverse order.','function reverseText(text) {\n  // your code\n}\n\nconsole.log(reverseText("Learny"));','ynraeL','Easy'],
+  ['javascript','Sum an Array','Return the total of all numbers in an array.','function sumNumbers(values) {\n  // your code\n}\n\nconsole.log(sumNumbers([2, 4, 6]));','12','Easy'],
+  ['javascript','Find the Largest','Return the largest number in an array.','function largest(values) {\n  // your code\n}\n\nconsole.log(largest([3, 9, 4]));','9','Medium'],
   ['html','Semantic Card','Create a card using semantic HTML and a heading.','<article>\n  <!-- build your card -->\n</article>','semantic article','Easy'],
-  ['css','Responsive Stack','Make three cards stack on small screens.','/* write responsive CSS */\n.card-list { }','media query','Medium']
+  ['html','Accessible Form','Create a labelled email input and submit button.','<form>\n  <!-- build your form -->\n</form>','label and input','Easy'],
+  ['css','Responsive Stack','Make three cards stack on small screens.','/* write responsive CSS */\n.card-list { }','media query','Medium'],
+  ['python','FizzBuzz Function','Write a function that returns FizzBuzz for a number.','def fizzbuzz(number):\n    # your code\n    pass\n\nprint(fizzbuzz(15))','FizzBuzz','Medium']
  ];
  const insertChallenge = db.prepare('INSERT INTO challenges(course_id,title,description,starter_code,expected,difficulty) VALUES(?,?,?,?,?,?)');
  for (const c of challenges) insertChallenge.run(courseIds[c[0]], ...c.slice(1));
@@ -183,6 +188,17 @@ function enrichCatalog() {
  ];
  for (const course of courses) insertCourse.run(...course);
  const courseIds = Object.fromEntries(db.prepare('SELECT slug,id FROM courses').all().map(row => [row.slug, row.id]));
+ const extraChallenges = [
+  ['javascript','Reverse a String','Return the characters of a string in reverse order.','function reverseText(text) {\n  // your code\n}\n\nconsole.log(reverseText("Learny"));','ynraeL','Easy'],
+  ['javascript','Find the Largest','Return the largest number in an array.','function largest(values) {\n  // your code\n}\n\nconsole.log(largest([3, 9, 4]));','9','Medium'],
+  ['html','Accessible Form','Create a labelled email input and submit button.','<form>\n  <!-- build your form -->\n</form>','label and input','Easy'],
+  ['python','FizzBuzz Function','Write a function that returns FizzBuzz for a number.','def fizzbuzz(number):\n    # your code\n    pass\n\nprint(fizzbuzz(15))','FizzBuzz','Medium']
+ ];
+ const challengeExists = db.prepare('SELECT 1 FROM challenges WHERE title=? LIMIT 1');
+ const addChallenge = db.prepare('INSERT INTO challenges(course_id,title,description,starter_code,expected,difficulty) VALUES(?,?,?,?,?,?)');
+ for (const challenge of extraChallenges) {
+  if (!challengeExists.get(challenge[1])) addChallenge.run(courseIds[challenge[0]], ...challenge.slice(1));
+ }
  const updateLesson = db.prepare(`UPDATE lessons SET level=?,objectives=?,example=?,practice_prompt=? WHERE slug=?`);
  const enriched = [
   ['Beginner','Declare predictable values, inspect types and avoid accidental reassignment.','const learner = { name: "Maya", lessons: 3 };\nconsole.log(learner.name);','Create a learner object with your name and completed lesson count, then print both values.','js-variables'],
