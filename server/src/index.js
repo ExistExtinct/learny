@@ -221,13 +221,55 @@ app.post('/api/lessons/:id/bookmark', authRequired, (req,res)=>{
 app.get('/api/practice', authRequired, (req,res)=>{
  const rows=db.prepare(`SELECT ch.*,c.slug courseSlug,c.title courseTitle,COALESCE(a.solved,0) solved,COALESCE(a.attempts,0) attempts FROM challenges ch JOIN courses c ON c.id=ch.course_id LEFT JOIN challenge_attempts a ON a.challenge_id=ch.id AND a.user_id=? ORDER BY ch.id`).all(req.user.id); res.json({challenges:rows});
 });
-app.post('/api/practice/:id/attempt', authRequired, (req,res)=>{
+const practiceCodeSchema=z.object({code:z.string().max(20000),action:z.enum(['run','submit']).default('run')});
+const harmfulCodePattern=/\b(?:process\.|require\s*\(|import\s*\(|fetch\s*\(|XMLHttpRequest|WebSocket|document\.cookie|localStorage|sessionStorage|indexedDB|navigator\.sendBeacon|eval\s*\(|Function\s*\(|location\.(?:assign|replace)|window\.open)\b/i;
+function parseAiVerdict(answer) {
+ const text=answer.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
+ try {
+  const verdict=JSON.parse(text);
+  if(typeof verdict.correct!=='boolean' || typeof verdict.harmful!=='boolean') return null;
+  return {correct:verdict.correct,harmful:verdict.harmful,feedback:String(verdict.feedback||'').slice(0,1000)};
+ } catch { return null; }
+}
+async function validatePracticeCode(user,challenge,code) {
+ if(harmfulCodePattern.test(code)) return {correct:false,harmful:true,feedback:'This code uses a blocked operation and was not run.'};
+ const system=`You are Learny AI Tutor validating a student coding challenge. Return JSON only, with exactly these fields: {"correct":boolean,"harmful":boolean,"feedback":"short explanation"}.
+Mark harmful true for code that accesses the network, filesystem, browser storage/cookies, process/runtime APIs, dynamic code execution, popups/navigation, or attempts to escape the browser sandbox. Mark correct true only when the code solves the challenge and produces the expected result. Do not reward placeholder code or explanations without working code.`;
+ const message=`Challenge: ${challenge.title}
+Description: ${challenge.description}
+Expected result: ${challenge.expected}
+Language: ${challenge.courseTitle}
+Student code:
+${code}`;
+ const result=await callAI({provider:'gemini',system:`${system}
+Student: ${user.display_name}.`,message});
+ const verdict=parseAiVerdict(result.answer);
+ if(!verdict) throw Object.assign(new Error('AI tutor returned an invalid code review. Please try again.'),{statusCode:502});
+ if(verdict.harmful) verdict.correct=false;
+ return verdict;
+}
+app.post('/api/practice/:id/validate', authRequired, tutorLimiter, async (req,res)=>{
+ const id=Number(req.params.id); const challenge=db.prepare('SELECT ch.*,c.title courseTitle FROM challenges ch JOIN courses c ON c.id=ch.course_id WHERE ch.id=?').get(id);
+ if(!challenge) return res.status(404).json({error:'Challenge not found'});
+ const parsed=practiceCodeSchema.safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Enter valid code before running it.'});
+ try {
+  const verdict=await validatePracticeCode(req.user,challenge,parsed.data.code);
+  res.json({...verdict,action:parsed.data.action});
+ } catch(e) {
+  console.error('Practice validation error:',e);
+  res.status(e?.statusCode||502).json({error:'AI tutor could not validate this code',details:e?.message||'Please try again.'});
+ }
+});
+app.post('/api/practice/:id/attempt', authRequired, tutorLimiter, async (req,res)=>{
  const id=Number(req.params.id); const challenge=db.prepare('SELECT * FROM challenges WHERE id=?').get(id); if(!challenge) return res.status(404).json({error:'Challenge not found'});
- const parsed=z.object({solved:z.boolean().optional().default(false)}).safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Invalid result'});
- const old=db.prepare('SELECT attempts,solved FROM challenge_attempts WHERE user_id=? AND challenge_id=?').get(req.user.id,id); const solved=Boolean(parsed.data.solved); const attempts=(old?.attempts||0)+1;
+ const parsed=z.object({code:z.string().max(20000)}).safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Enter valid code before submitting.'});
+ let verdict;
+ try { verdict=await validatePracticeCode(req.user,challenge,parsed.data.code); }
+ catch(e) { console.error('Practice submission validation error:',e); return res.status(e?.statusCode||502).json({error:'AI tutor could not validate this submission',details:e?.message||'Please try again.'}); }
+ const old=db.prepare('SELECT attempts,solved FROM challenge_attempts WHERE user_id=? AND challenge_id=?').get(req.user.id,id); const solved=verdict.correct&&!verdict.harmful; const attempts=(old?.attempts||0)+1;
  db.prepare(`INSERT INTO challenge_attempts(user_id,challenge_id,solved,attempts,updated_at) VALUES(?,?,?, ?,CURRENT_TIMESTAMP) ON CONFLICT(user_id,challenge_id) DO UPDATE SET solved=MAX(solved,excluded.solved),attempts=excluded.attempts,updated_at=CURRENT_TIMESTAMP`).run(req.user.id,id,solved?1:0,attempts);
  if(solved && !old?.solved){db.prepare('UPDATE users SET xp=xp+30 WHERE id=?').run(req.user.id); logActivity(req.user.id,'practice',`Solved ${challenge.title}`,30);}
- res.json({solved,attempts});
+ res.json({solved:verdict.correct&&!verdict.harmful,attempts,correct:verdict.correct,harmful:verdict.harmful,feedback:verdict.feedback});
 });
 
 const tutorEventSchema = z.object({ eventType:z.enum(['session_start','session_end','editor_change','run','error','hint_request','page_view']), payload:z.record(z.string(), z.any()).optional().default({}) });
@@ -253,11 +295,15 @@ const tutorActionSchema=z.object({
  provider:z.enum(['gemini','openai']).default('gemini'),
  mode:z.enum(['text','voice']).default('text'),
  action:z.enum(['ask','explain','summarize','note','quiz','code','review']).default('ask'),
- message:z.string().trim().min(1).max(6000),
+ message:z.string().trim().min(1).max(20000),
  context:z.record(z.string(),z.any()).optional().default({})
 });
+function needsCodeContinuation(answer) {
+ const fences=(answer.match(/```/g)||[]).length;
+ return fences%2===1 || /<!doctype html/i.test(answer)&&!/<\/html>/i.test(answer);
+}
 
-async function callAI({provider,system,message}){
+async function callAI({provider,system,message,maxOutputTokens=1200}){
  if(provider==='gemini'){
   const apiKey=process.env.GEMINI_API_KEY?.trim();
   if(!apiKey) throw Object.assign(new Error('Gemini is not configured. Add GEMINI_API_KEY to server/.env.'),{statusCode:503});
@@ -265,7 +311,7 @@ async function callAI({provider,system,message}){
   const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),30000);
   let r;
   try{
-   r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({systemInstruction:{parts:[{text:system}]},contents:[{role:'user',parts:[{text:message}]}],generationConfig:{temperature:.2,maxOutputTokens:1200}}),signal:controller.signal});
+   r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({systemInstruction:{parts:[{text:system}]},contents:[{role:'user',parts:[{text:message}]}],generationConfig:{temperature:.2,maxOutputTokens}}),signal:controller.signal});
   }catch(e){
    if(e?.name==='AbortError') throw Object.assign(new Error('Gemini request timed out after 30 seconds.'),{statusCode:504});
    throw e;
@@ -275,9 +321,10 @@ async function callAI({provider,system,message}){
    console.error('[Gemini]',r.status,model,d?.error||raw);
    throw Object.assign(new Error(d?.error?.message||`Gemini returned HTTP ${r.status}`),{statusCode:502,providerStatus:r.status,providerCode:d?.error?.status||null,model});
   }
-  const answer=d?.candidates?.[0]?.content?.parts?.map(x=>x?.text||'').join('').trim();
+  const candidate=d?.candidates?.[0];
+  const answer=candidate?.content?.parts?.map(x=>x?.text||'').join('').trim();
   if(!answer) throw Object.assign(new Error('Gemini returned an empty response.'),{statusCode:502,model});
-  return {answer,model};
+  return {answer,model,finishReason:candidate?.finishReason||null};
  }
  if(!process.env.OPENAI_API_KEY) throw Object.assign(new Error('OpenAI is not configured. Add OPENAI_API_KEY to server/.env.'),{statusCode:503});
  const model=process.env.OPENAI_MODEL||'gpt-5-mini';
@@ -286,7 +333,7 @@ async function callAI({provider,system,message}){
  if(!r.ok) throw Object.assign(new Error(d?.error?.message||`OpenAI returned HTTP ${r.status}`),{statusCode:502,providerStatus:r.status,model});
  const answer=d?.output_text||d?.output?.flatMap(x=>x.content||[]).map(x=>x.text||'').join('').trim();
  if(!answer) throw Object.assign(new Error('OpenAI returned an empty response.'),{statusCode:502,model});
- return {answer,model};
+ return {answer,model,finishReason:d?.status||null};
 }
 
 app.post('/api/tutor/ask', authRequired, tutorLimiter, async (req,res)=>{
@@ -299,7 +346,7 @@ app.post('/api/tutor/ask', authRequired, tutorLimiter, async (req,res)=>{
   summarize:'Summarize the supplied topic/content into clear study notes with headings and bullet points.',
   note:'Create a polished study note for the requested topic. Include definition, key ideas, example, common mistakes and a quick recap.',
   quiz:'Create a short test with 5 questions. Mix multiple-choice and short-answer questions. Put the answer key after the questions.',
-  code:'Generate production-minded code for the requested task. State assumptions, include the code in a fenced block, and briefly explain how to use it.',
+  code:'Generate complete, runnable code for the requested task. If the user asks for HTML, CSS and JavaScript in one file, return one complete self-contained HTML document with CSS in a <style> block and JavaScript in a <script> block. Never stop halfway, omit sections, use placeholders, or truncate the code. Finish every code fence and include a brief usage note only after the complete code.',
   review:'Review the supplied code or learning context. Identify real issues, explain why they occur, and show the smallest useful fix.'
  }[action];
  const system=`You are Learny AI Tutor, a patient coding and study mentor.
@@ -309,8 +356,20 @@ Task: ${actionInstruction}
 Never claim access to the device, camera, microphone, unrelated files or other apps. Only use the context supplied below. Be accurate, concise, and actionable.
 Context: ${JSON.stringify(context||{})}`;
  try{
-  const result=await callAI({provider,system,message});
-  const answer=result.answer;
+  let result=await callAI({provider,system,message,maxOutputTokens:action==='code'?8192:1200});
+  let answer=result.answer;
+  if(action==='code' && (result.finishReason==='MAX_TOKENS'||needsCodeContinuation(answer))){
+   for(let part=1;part<=3 && (result.finishReason==='MAX_TOKENS'||needsCodeContinuation(answer));part++){
+    result=await callAI({
+     provider,
+     system:`${system}
+The previous response was cut off by the output limit. Continue the exact same answer from the cutoff. Output only the missing continuation, do not restart the code, do not repeat earlier lines, and finish all remaining HTML/CSS/JavaScript tags and code fences.`,
+     message:`Original request:\n${message}\n\nPrevious response (continue exactly after its final character):\n${answer}`,
+     maxOutputTokens:8192
+    });
+    answer+=result.answer;
+   }
+  }
   db.prepare('INSERT INTO tutor_events(user_id,event_type,payload) VALUES(?,?,?)').run(req.user.id,'tutor_response',JSON.stringify({provider,mode,action,message,answer:answer.slice(0,6000)}));
   res.json({answer,provider,mode,action,model:result.model});
  }catch(e){
