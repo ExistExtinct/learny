@@ -179,22 +179,32 @@ The AI Tutor supports:
 
 The Notes page also has an **AI note maker**.
 
-## 9. Practice Lab
+## 9. Code Studio and Docker sandbox
 
-The Practice Lab includes:
+The Practice route is now a VS Code-style Code Studio with:
 
-- CodeMirror editor
-- JavaScript and HTML support
-- sandboxed browser execution
-- resizable coding area / terminal split
-- Output and Preview tabs
-- runtime error capture
-- Submit / XP flow
-- AI code coach
+- multi-file explorer and editor tabs
+- HTML/CSS/JavaScript live preview in a sandboxed iframe
+- terminal output and optional standard input
+- Python, Java, C++, C, Go, Rust, Ruby and Node.js container runners
+- Run/Stop controls and execution status
+- disposable Docker execution with no network, no host mounts, a non-root user, read-only root filesystem, CPU/memory/PID limits, timeouts and output limits
 
-The resize handle between the editor and terminal can be dragged freely. The navigation hamburger also works on desktop: it collapses/expands the sidebar. On mobile it opens a drawer.
+Install and start Docker Desktop before using server-side languages. Learny intentionally fails closed when Docker is unavailable; it never runs submitted server-side code directly on the host.
 
-Python and Node server execution are intentionally disabled. Do not enable arbitrary server-side execution without a hardened isolated execution service.
+The first run may need the language images:
+
+```powershell
+docker pull python:3.12-alpine
+docker pull node:22-alpine
+docker pull eclipse-temurin:21-jdk-alpine
+docker pull gcc:14
+docker pull golang:1.23-alpine
+docker pull rust:1.81-alpine
+docker pull ruby:3.3-alpine
+```
+
+For public deployment, use a separate execution worker host with Docker daemon isolation, monitoring and quotas.
 
 ## 10. Authentication
 

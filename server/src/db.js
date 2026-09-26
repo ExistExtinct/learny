@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureCurriculum, ensurePracticeCatalog } from './curriculum.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.join(__dirname, '..', 'data');
@@ -64,7 +65,8 @@ CREATE TABLE IF NOT EXISTS challenges (
  description TEXT NOT NULL,
  starter_code TEXT NOT NULL,
  expected TEXT NOT NULL,
- difficulty TEXT NOT NULL
+ difficulty TEXT NOT NULL,
+ files TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS challenge_attempts (
  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -113,6 +115,7 @@ addColumnIfMissing('lessons', 'level', "TEXT NOT NULL DEFAULT 'Beginner'");
 addColumnIfMissing('lessons', 'objectives', "TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing('lessons', 'example', "TEXT NOT NULL DEFAULT ''");
 addColumnIfMissing('lessons', 'practice_prompt', "TEXT NOT NULL DEFAULT ''");
+addColumnIfMissing('challenges', 'files', "TEXT NOT NULL DEFAULT '[]'");
 db.exec(`
 CREATE TABLE IF NOT EXISTS auth_tokens (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +134,8 @@ CREATE INDEX IF NOT EXISTS idx_auth_tokens_expiry ON auth_tokens(expires_at);
 const courseCount = db.prepare('SELECT COUNT(*) c FROM courses').get().c;
 if (courseCount === 0) seed();
 enrichCatalog();
+ensureCurriculum(db);
+ensurePracticeCatalog(db);
 
 function seed() {
  const courses = [

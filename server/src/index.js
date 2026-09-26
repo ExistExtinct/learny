@@ -15,24 +15,43 @@ import {
  createPasswordResetToken, setAuthCookie, clearAuthCookie, authRequired,
  consumeToken, markTokenUsed, revokeUserSessions, safeAuthUser, randomToken
 } from './auth.js';
+import { executeCode } from './code-execution.js';
 
 const app = express();
 const isProd = process.env.NODE_ENV === 'production';
 app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy: isProd ? undefined : false }));
-app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173', credentials:true }));
+app.use(cors({ origin: allowedFrontendOrigins(), credentials:true }));
 app.use(express.json({ limit:'100kb' }));
 app.use(cookieParser());
 app.use(rateLimit({ windowMs:15*60*1000, limit:300, standardHeaders:true, legacyHeaders:false }));
 const authLimiter = rateLimit({ windowMs:15*60*1000, limit:30, message:{error:'Too many authentication attempts. Try again later.'} });
 const tutorLimiter = rateLimit({ windowMs:60*1000, limit:20, message:{error:'Tutor rate limit reached. Please wait a minute.'} });
+const executionLimiter = rateLimit({ windowMs:60*1000, limit:5, standardHeaders:true, legacyHeaders:false, message:{error:'Code execution rate limit reached. Please wait a minute.'} });
 
 const registerSchema = z.object({ username:z.string().trim().min(3).max(24).regex(/^[a-zA-Z0-9_]+$/), email:z.string().trim().email().max(160), password:z.string().min(8).max(72), displayName:z.string().trim().min(2).max(50) });
 const loginSchema = z.object({ identifier:z.string().trim().min(3).max(160), password:z.string().min(1).max(72) });
 const themeSchema = z.object({ theme:z.enum(['dark','light','system']) });
 
 const safeUser = safeAuthUser;
-function frontendOrigin() { return process.env.CLIENT_ORIGIN || 'http://localhost:5173'; }
+function allowedFrontendOrigins() {
+ const configured = process.env.CLIENT_ORIGIN?.trim();
+ if (configured) {
+  try {
+   const url = new URL(configured);
+   if (!isProd && (url.hostname === 'localhost' || url.hostname === '127.0.0.1')) {
+    const alternate = new URL(configured);
+    alternate.hostname = url.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+    return [configured, alternate.origin];
+   }
+  } catch {
+   return [configured];
+  }
+  return [configured];
+ }
+ return isProd ? ['http://127.0.0.1:5173'] : ['http://127.0.0.1:5173','http://localhost:5173'];
+}
+function frontendOrigin() { return allowedFrontendOrigins()[0]; }
 function smtpReady() { return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS); }
 function mailer() { return nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||587),secure:process.env.SMTP_SECURE==='true',auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}}); }
 async function sendMail(to, subject, text, html) {
@@ -51,7 +70,8 @@ function verificationEmail(link) {
   html: `<div style="margin:0;background:#f5f3ff;padding:40px 16px;font-family:Arial,sans-serif;color:#211b3d"><div style="max-width:560px;margin:auto;background:#fff;border-radius:18px;padding:36px;box-shadow:0 8px 30px rgba(43,27,91,.12)"><div style="font-size:24px;font-weight:700;color:#6d28d9">Learny</div><h1 style="font-size:28px;margin:28px 0 12px">Welcome to your learning journey!</h1><p style="font-size:16px;line-height:1.6;color:#5b5570">Thanks for creating your Learny account. Confirm your email to unlock your courses, practice lab and projects.</p><p style="text-align:center;margin:30px 0"><a href="${link}" style="display:inline-block;background:#7c3aed;color:#fff;text-decoration:none;border-radius:10px;padding:14px 24px;font-weight:700">Verify my email</a></p><p style="font-size:13px;line-height:1.5;color:#77718b">This secure link expires in 24 hours. If you did not create a Learny account, you can safely ignore this message.</p></div></div>`
  };
 }
-function requireSameOrigin(req,res,next) { const origin=req.get('origin'); if(origin && origin !== frontendOrigin()) return res.status(403).json({error:'Cross-site request blocked'}); next(); }
+function requireSameOrigin(req,res,next) { const origin=req.get('origin'); if(origin && !allowedFrontendOrigins().includes(origin)) return res.status(403).json({error:'Cross-site request blocked'}); next(); }
+function requireExecutionSameOrigin(req,res,next) { const origin=req.get('origin'); if(!origin || !allowedFrontendOrigins().includes(origin)) return res.status(403).json({error:'Same-origin request required'}); next(); }
 function cleanupAuthTokens(){ db.prepare("DELETE FROM auth_tokens WHERE expires_at <= CURRENT_TIMESTAMP OR used_at IS NOT NULL").run(); }
 setInterval(cleanupAuthTokens, 60*60*1000).unref();
 function logActivity(userId,type,label,xp=0) { db.prepare('INSERT INTO activity(user_id,type,label,xp) VALUES(?,?,?,?)').run(userId,type,label,xp); }
@@ -98,6 +118,19 @@ app.post('/api/auth/logout', requireSameOrigin, (req,res)=>{
  clearAuthCookie(res); res.json({ok:true});
 });
 app.get('/api/auth/me', authRequired, (req,res)=>res.json({user:safeUser(req.user)}));
+
+async function executeCodeHandler(req,res) {
+ try {
+  const result = await executeCode(req.body);
+  res.json(result);
+ } catch (error) {
+  const status = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+  if (status >= 500) console.error('Code execution error:', error);
+  res.status(status).json({error: status === 503 ? error.message : (status === 400 ? error.message : 'Code execution failed')});
+ }
+}
+app.post('/api/execute', requireExecutionSameOrigin, authRequired, executionLimiter, executeCodeHandler);
+app.post('/api/code/run', requireExecutionSameOrigin, authRequired, executionLimiter, executeCodeHandler);
 
 app.post('/api/auth/verify-email', authLimiter, requireSameOrigin, async (req,res)=>{
  const parsed=z.object({token:z.string().min(20).max(300)}).safeParse(req.body);
@@ -205,6 +238,12 @@ app.get('/api/lessons/:slug', authRequired, (req,res)=>{
  const l=db.prepare(`SELECT l.*,l.practice_prompt practicePrompt,c.slug courseSlug,c.title courseTitle,COALESCE(p.completed,0) completed,COALESCE(p.bookmarked,0) bookmarked FROM lessons l JOIN courses c ON c.id=l.course_id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? WHERE l.slug=?`).get(req.user.id,req.params.slug);
  if(!l) return res.status(404).json({error:'Lesson not found'}); res.json({lesson:l});
 });
+app.get('/api/lessons/:slug/projects', authRequired, (req,res)=>{
+ const lesson=db.prepare('SELECT id FROM lessons WHERE slug=?').get(req.params.slug);
+ if(!lesson) return res.status(404).json({error:'Lesson not found'});
+ const projects=db.prepare('SELECT id,title,difficulty,description,requirements,order_no orderNo FROM lesson_projects WHERE lesson_id=? ORDER BY order_no').all(lesson.id);
+ res.json({projects});
+});
 app.post('/api/lessons/:id/progress', authRequired, (req,res)=>{
  const id=Number(req.params.id); if(!Number.isInteger(id)) return res.status(400).json({error:'Invalid lesson'});
  const lesson=db.prepare('SELECT * FROM lessons WHERE id=?').get(id); if(!lesson) return res.status(404).json({error:'Lesson not found'});
@@ -219,9 +258,11 @@ app.post('/api/lessons/:id/bookmark', authRequired, (req,res)=>{
  db.prepare(`INSERT INTO progress(user_id,lesson_id,bookmarked) VALUES(?,?,?) ON CONFLICT(user_id,lesson_id) DO UPDATE SET bookmarked=excluded.bookmarked,updated_at=CURRENT_TIMESTAMP`).run(req.user.id,id,next); res.json({bookmarked:Boolean(next)});
 });
 app.get('/api/practice', authRequired, (req,res)=>{
- const rows=db.prepare(`SELECT ch.*,c.slug courseSlug,c.title courseTitle,COALESCE(a.solved,0) solved,COALESCE(a.attempts,0) attempts FROM challenges ch JOIN courses c ON c.id=ch.course_id LEFT JOIN challenge_attempts a ON a.challenge_id=ch.id AND a.user_id=? ORDER BY ch.id`).all(req.user.id); res.json({challenges:rows});
+ const rows=db.prepare(`SELECT ch.*,c.slug courseSlug,c.title courseTitle,COALESCE(a.solved,0) solved,COALESCE(a.attempts,0) attempts FROM challenges ch JOIN courses c ON c.id=ch.course_id LEFT JOIN challenge_attempts a ON a.challenge_id=ch.id AND a.user_id=? ORDER BY ch.id`).all(req.user.id).map(row=>({...row,files:JSON.parse(row.files||'[]')}));
+ res.json({challenges:rows});
 });
 const practiceCodeSchema=z.object({code:z.string().max(20000),action:z.enum(['run','submit']).default('run')});
+const practicePreflightSchema=z.object({code:z.string().max(20000),language:z.string().max(40),question:z.string().max(500).optional()});
 const harmfulCodePattern=/\b(?:process\.|require\s*\(|import\s*\(|fetch\s*\(|XMLHttpRequest|WebSocket|document\.cookie|localStorage|sessionStorage|indexedDB|navigator\.sendBeacon|eval\s*\(|Function\s*\(|location\.(?:assign|replace)|window\.open)\b/i;
 function parseAiVerdict(answer) {
  const text=answer.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
@@ -231,6 +272,36 @@ function parseAiVerdict(answer) {
   return {correct:verdict.correct,harmful:verdict.harmful,feedback:String(verdict.feedback||'').slice(0,1000)};
  } catch { return null; }
 }
+function parsePreflightVerdict(answer) {
+ const text=answer.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
+ try {
+  const verdict=JSON.parse(text);
+  if(typeof verdict.safe!=='boolean' || typeof verdict.hasMistake!=='boolean') return null;
+  return {safe:verdict.safe,hasMistake:verdict.hasMistake,feedback:String(verdict.feedback||'').slice(0,1000)};
+ } catch { return null; }
+}
+app.post('/api/practice/preflight', authRequired, tutorLimiter, async (req,res)=>{
+ const parsed=practicePreflightSchema.safeParse(req.body);
+ if(!parsed.success) return res.status(400).json({error:'Enter valid code before checking it.'});
+ const {code,language,question}=parsed.data;
+ if(harmfulCodePattern.test(code)) return res.json({safe:false,hasMistake:true,feedback:'This code uses a blocked operation and was not run.'});
+ const system=`You are a careful coding safety and quality gate. Return JSON only with exactly {"safe":boolean,"hasMistake":boolean,"feedback":"short actionable explanation"}.
+safe must be false for network access, filesystem access, secrets, runtime escape, dynamic code execution, destructive operations, or code that is clearly unsafe.
+hasMistake must be true for syntax errors, unfinished placeholders, obvious runtime errors, or a solution that cannot reasonably run. Do not reject valid beginner code merely because it could be optimized. Never provide a complete replacement solution.`;
+ const message=`Language: ${language}
+Question: ${question||'Open practice'}
+Student code:
+${code}`;
+ try {
+  const result=await callAI({provider:'gemini',system,message,maxOutputTokens:500});
+  const verdict=parsePreflightVerdict(result.answer);
+  if(!verdict) throw Object.assign(new Error('AI returned an invalid preflight review.'),{statusCode:502});
+  res.json(verdict);
+ } catch(e) {
+  console.error('Practice preflight error:',e);
+  res.status(e?.statusCode||502).json({error:'AI preflight check failed. Code was not run.',details:e?.message||'Please try again.'});
+ }
+});
 async function validatePracticeCode(user,challenge,code) {
  if(harmfulCodePattern.test(code)) return {correct:false,harmful:true,feedback:'This code uses a blocked operation and was not run.'};
  const system=`You are Learny AI Tutor validating a student coding challenge. Return JSON only, with exactly these fields: {"correct":boolean,"harmful":boolean,"feedback":"short explanation"}.
@@ -336,9 +407,11 @@ async function callAI({provider,system,message,maxOutputTokens=1200}){
  return {answer,model,finishReason:d?.status||null};
 }
 
-app.post('/api/tutor/ask', authRequired, tutorLimiter, async (req,res)=>{
+app.post('/api/tutor/ask', requireSameOrigin, authRequired, tutorLimiter, async (req,res)=>{
  const parsed=tutorActionSchema.safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Invalid tutor request',details:parsed.error.issues?.[0]?.message});
  const {provider,mode,action,message,context}=parsed.data;
+ const contextText=JSON.stringify(context||{});
+ if(contextText.length>30000) return res.status(413).json({error:'Tutor context is too large. Remove some pasted code or conversation history and try again.'});
  const overview=db.prepare('SELECT COUNT(*) total, SUM(CASE WHEN completed=1 THEN 1 ELSE 0 END) completed FROM progress WHERE user_id=?').get(req.user.id);
  const actionInstruction={
   ask:"Answer the student's question clearly with a practical example.",
@@ -346,7 +419,7 @@ app.post('/api/tutor/ask', authRequired, tutorLimiter, async (req,res)=>{
   summarize:'Summarize the supplied topic/content into clear study notes with headings and bullet points.',
   note:'Create a polished study note for the requested topic. Include definition, key ideas, example, common mistakes and a quick recap.',
   quiz:'Create a short test with 5 questions. Mix multiple-choice and short-answer questions. Put the answer key after the questions.',
-  code:'Generate complete, runnable code for the requested task. If the user asks for HTML, CSS and JavaScript in one file, return one complete self-contained HTML document with CSS in a <style> block and JavaScript in a <script> block. Never stop halfway, omit sections, use placeholders, or truncate the code. Finish every code fence and include a brief usage note only after the complete code.',
+  code:'Generate complete, runnable code for the requested task. Always put every program in a fenced Markdown code block with the correct language label so the client can render it safely in a code editor-style panel. If the user asks for HTML, CSS and JavaScript in one file, return one complete self-contained HTML document with CSS in a <style> block and JavaScript in a <script> block. Never stop halfway, omit sections, use placeholders, or truncate the code. Finish every code fence and include a brief usage note only after the complete code.',
   review:'Review the supplied code or learning context. Identify real issues, explain why they occur, and show the smallest useful fix.'
  }[action];
  const system=`You are Learny AI Tutor, a patient coding and study mentor.
@@ -354,12 +427,12 @@ Student: ${req.user.display_name}.
 Lesson progress: ${overview.completed||0}/${overview.total||0}.
 Task: ${actionInstruction}
 Never claim access to the device, camera, microphone, unrelated files or other apps. Only use the context supplied below. Be accurate, concise, and actionable.
-Context: ${JSON.stringify(context||{})}`;
+Context: ${contextText}`;
  try{
   let result=await callAI({provider,system,message,maxOutputTokens:action==='code'?8192:1200});
   let answer=result.answer;
   if(action==='code' && (result.finishReason==='MAX_TOKENS'||needsCodeContinuation(answer))){
-   for(let part=1;part<=3 && (result.finishReason==='MAX_TOKENS'||needsCodeContinuation(answer));part++){
+   for(let part=1;part<=8 && (result.finishReason==='MAX_TOKENS'||needsCodeContinuation(answer));part++){
     result=await callAI({
      provider,
      system:`${system}
@@ -385,7 +458,7 @@ app.patch('/api/notes/:id',authRequired,(req,res)=>{const id=Number(req.params.i
 app.delete('/api/notes/:id',authRequired,(req,res)=>{const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Invalid note'});db.prepare('DELETE FROM notes WHERE id=? AND user_id=?').run(id,req.user.id);res.status(204).end()});
 
 app.get('/api/profile', authRequired,(req,res)=>res.json({user:safeUser(req.user),bookmarks:db.prepare(`SELECT l.slug,l.title,c.title courseTitle FROM progress p JOIN lessons l ON l.id=p.lesson_id JOIN courses c ON c.id=l.course_id WHERE p.user_id=? AND p.bookmarked=1 ORDER BY p.updated_at DESC`).all(req.user.id)}));
-app.patch('/api/settings', authRequired,(req,res)=>{
+app.patch('/api/settings',requireSameOrigin,authRequired,(req,res)=>{
  const parsed=themeSchema.safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Invalid setting'}); db.prepare('UPDATE users SET theme=? WHERE id=?').run(parsed.data.theme,req.user.id); const u=db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id); res.json({user:safeUser(u)});
 });
 

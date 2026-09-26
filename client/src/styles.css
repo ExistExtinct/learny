@@ -12,3 +12,87 @@
 .tutorConversation{display:flex;flex-direction:column;gap:12px;max-height:540px;overflow-y:auto;direction:rtl;scrollbar-width:thin;scrollbar-color:#6d5bb5 #171b30}.tutorConversation>*{direction:ltr}.tutorConversation::-webkit-scrollbar{width:9px}.tutorConversation::-webkit-scrollbar-track{background:#171b30;border-radius:8px}.tutorConversation::-webkit-scrollbar-thumb{background:#6d5bb5;border-radius:8px;border:2px solid #171b30}.tutorQuestion{display:flex;flex-direction:column;gap:5px;align-self:flex-end;max-width:90%;padding:10px 13px;border:1px solid #493879;border-radius:12px;background:#201b3b;color:#ddd7f4;white-space:pre-wrap;overflow-wrap:anywhere}.tutorQuestion b{font-size:11px;color:#bcaeff;text-transform:uppercase;letter-spacing:.08em}.tutorConversation .tutorAnswer{max-height:none;min-height:180px;overflow:visible;direction:ltr}
 .chatBox .tutorConversation{height:520px;max-height:520px;min-height:0;overflow-y:scroll;overflow-x:hidden}
 .chatBox{min-width:0;overflow:hidden}.tutorChatHistory{height:92px;overflow-y:auto;overflow-x:hidden;border:1px solid var(--line);border-radius:12px;padding:8px;background:#0b0e1a;scrollbar-width:thin;scrollbar-color:#6d5bb5 #171b30}.tutorHistoryItem{padding:6px 9px;color:#bfc6dd;border-bottom:1px solid #20253a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.tutorHistoryItem b{color:#bcaeff;font-size:10px;text-transform:uppercase;margin-right:8px}.tutorAnswerViewport{height:520px;min-height:0;max-width:100%;overflow-y:scroll;overflow-x:hidden;border:1px solid var(--line);border-radius:12px;background:#0b0e1a;padding:14px;scrollbar-width:thin;scrollbar-color:#6d5bb5 #171b30}.tutorAnswerViewport::-webkit-scrollbar,.tutorChatHistory::-webkit-scrollbar{width:9px}.tutorAnswerViewport::-webkit-scrollbar-track,.tutorChatHistory::-webkit-scrollbar-track{background:#171b30;border-radius:8px}.tutorAnswerViewport::-webkit-scrollbar-thumb,.tutorChatHistory::-webkit-scrollbar-thumb{background:#6d5bb5;border-radius:8px;border:2px solid #171b30}.tutorAnswerViewport .tutorAnswer{border:0;padding:0;min-height:0;max-height:none;overflow:visible}.tutorAnswerViewport .tutorQuestion{margin-bottom:12px}
+/* Code Studio */
+.codeStudio{max-width:1600px;margin:0 auto}.studioToolbar{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:20px}.studioToolbar h1{font-size:clamp(30px,4vw,46px);margin:8px 0}.studioActions{display:flex;align-items:center;gap:10px}.studioActions select{background:#111426;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 12px}.studioGrid{display:grid;grid-template-columns:220px minmax(0,1.35fr) minmax(280px,.9fr);grid-template-rows:auto;gap:12px;align-items:stretch}.studioGrid .panel{min-width:0;border:1px solid var(--line);background:#101324;border-radius:14px;overflow:hidden}.studioExplorer{min-height:620px;padding:12px 8px;display:flex;flex-direction:column}.studioPanelTitle{display:flex;align-items:center;justify-content:space-between;color:#8f97b1;font-size:11px;font-weight:800;letter-spacing:.12em;padding:2px 5px 10px}.studioFile{display:flex;align-items:center;gap:3px;border-radius:8px}.studioFile.active{background:rgba(124,58,237,.2)}.studioFile>button:first-child{display:flex;align-items:center;gap:8px;min-width:0;flex:1;border:0;background:transparent;color:#cdd2e4;text-align:left;padding:9px 7px}.studioFile.active>button:first-child{color:#fff}.studioFile span{overflow:hidden;text-overflow:ellipsis}.studioFileRemove{border:0;background:transparent;color:#74809e;padding:5px 8px}.studioFileRemove:hover{color:var(--danger)}.studioChallenges{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}.studioChallenge{width:100%;border:0;background:transparent;color:#aeb6cf;text-align:left;padding:8px 6px;border-radius:7px;display:flex;justify-content:space-between;gap:8px}.studioChallenge:hover,.studioChallenge.active{background:#1b1e34;color:#fff}.studioChallenge small{color:#8d95ad;font-size:10px}.studioExplorerHint{margin-top:auto;color:#727b99;font-size:11px;line-height:1.45;padding:12px 5px}.studioEditor{display:flex;flex-direction:column}.studioTabs{display:flex;overflow-x:auto;border-bottom:1px solid var(--line);background:#0c0f1d}.studioTab{display:flex;align-items:center;gap:8px;border:0;border-right:1px solid var(--line);background:transparent;color:#8d95ad;padding:12px 15px;white-space:nowrap}.studioTab.active{background:#171b30;color:#fff}.tabDot{width:5px;height:5px;border-radius:50%;background:#a78bfa}.studioEditor .cm-editor{flex:1}.studioEditor .cm-scroller{overflow:auto}.studioStatus{display:flex;justify-content:space-between;gap:10px;color:#7d86a2;font-size:11px;border-top:1px solid var(--line);padding:8px 12px}.statusError{color:var(--danger)}.studioOutput{min-height:620px;display:flex;flex-direction:column}.studioOutputHead{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding:7px 9px}.studioOutputTabs{display:flex;gap:4px}.studioOutputTabs button{display:flex;align-items:center;gap:6px;border:0;background:transparent;color:#8d95ad;padding:7px 9px;border-radius:7px}.studioOutputTabs button.active{background:#24203f;color:#fff}.studioPreviewWrap{flex:1;min-height:400px;background:#f8fafc;display:flex}.studioPreviewWrap iframe{width:100%;border:0;min-height:100%}.studioEmptyOutput{margin:auto;text-align:center;color:#68718c;max-width:220px}.studioTerminal{flex:1;display:flex;flex-direction:column;gap:18px;padding:14px;background:#090b16}.studioTerminal pre{white-space:pre-wrap;overflow:auto;color:#d5d9e8;font:13px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;min-height:150px;margin:0}.stdinBox{display:grid;gap:6px;color:#8992ae;font-size:11px}.stdinBox textarea{resize:vertical;background:#111426;color:#eef1fb;border:1px solid var(--line);border-radius:8px;padding:8px;outline:0;font:12px ui-monospace,SFMono-Regular,Consolas,monospace}.stdinBox textarea:focus{border-color:#6951b9}@media(max-width:1150px){.studioGrid{grid-template-columns:190px minmax(0,1fr)}.studioOutput{grid-column:1/-1;min-height:360px}.studioExplorer{min-height:560px}}@media(max-width:700px){.studioToolbar{align-items:stretch;flex-direction:column}.studioActions{justify-content:stretch}.studioActions>*{flex:1}.studioGrid{display:flex;flex-direction:column}.studioExplorer{min-height:0;max-height:280px}.studioOutput{min-height:360px}.studioStatus{flex-direction:column}.content{padding:18px 12px}}
+/* Multi-file workspace additions */
+.projectMeta{display:flex;gap:10px;align-items:center;padding:12px;margin-bottom:14px;flex-wrap:wrap}.projectMeta .noteTitle{flex:1;min-width:180px}.projectMeta .projectDescription{flex:2;margin:0;min-width:220px}.workspaceTree{padding:4px 0}.treeActions{display:flex;gap:6px;padding:0 8px 9px;border-bottom:1px solid var(--line);margin-bottom:5px}.treeRow{display:flex;align-items:center;gap:7px;min-height:34px;padding:4px 8px;color:#aab1c9;font-size:13px;border-radius:7px}.treeRow:hover,.treeRow.active{background:#1a1e34;color:#fff}.treeRow>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}.treeRow button{border:0;background:transparent;color:#6f7898;padding:2px 4px;font-size:14px}.treeRow button:hover{color:#fff}.fileRow>button:first-child{display:flex;align-items:center;gap:7px;min-width:0;flex:1;border:0;background:transparent;color:inherit;text-align:left}.folderRow{color:#c4b5fd}.projectEmpty{min-height:260px;display:grid;place-items:center}.studioExplorer{min-width:0}.studioFileList{max-height:none}
+.workspaceDialogBackdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:1rem;background:rgb(3 6 20/.7);backdrop-filter:blur(6px)}
+.workspaceDialog{width:min(100%,420px);padding:1.25rem;border:1px solid var(--border);border-radius:1rem;background:var(--panel);box-shadow:0 24px 80px rgb(0 0 0/.35)}
+.practiceReview{display:flex;gap:10px;align-items:flex-start;margin:-6px 0 14px;padding:12px 14px;border:1px solid #6b4b22;border-radius:10px;background:#2a2115;color:#f5d7a0}.practiceReview.success{border-color:#276749;background:#13271f;color:#b7f3ce}.practiceReview strong{white-space:nowrap}.practiceReview span{line-height:1.45}
+.workspaceDialog h2{margin:0 0 1rem;font-size:1.1rem}
+.workspaceDialog input{width:100%;box-sizing:border-box;padding:.75rem .8rem;border:1px solid var(--border);border-radius:.65rem;background:var(--input);color:var(--text);font:inherit}
+.workspaceDialogActions{display:flex;justify-content:flex-end;gap:.65rem;margin-top:1rem}
+.lessonProjects{margin-top:32px;padding-top:28px;border-top:1px solid var(--line)}
+.lessonProjectsHead{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:18px}
+.lessonProjectsHead h2{margin:6px 0 6px}
+.projectCount{font-size:13px;font-weight:700;color:var(--muted);white-space:nowrap}
+.projectGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.projectCard{border:1px solid var(--line);border-radius:14px;padding:16px;background:rgba(255,255,255,.025)}
+.projectCardTop{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.projectNumber{font-size:12px;font-weight:800;color:var(--accent,#a78bfa)}
+.projectCard h3{font-size:16px;margin:0 0 8px}
+.projectCard p{font-size:13px;line-height:1.55;color:var(--muted);margin:0 0 12px}
+.projectCard small{display:block;font-size:12px;line-height:1.5;color:var(--muted)}
+@media(max-width:700px){.projectGrid{grid-template-columns:1fr}.lessonProjectsHead{display:block}.projectCount{display:block;margin-top:10px}}
+.practiceIntro{display:flex;justify-content:space-between;align-items:end;gap:24px;margin-bottom:22px;padding:24px;border:1px solid var(--line);border-radius:20px;background:linear-gradient(135deg,#12152a,#0e1020)}
+.practiceIntro h1{font-size:clamp(30px,4vw,44px);margin:10px 0 8px}
+.practiceIntro p{max-width:680px;margin:0}
+.practiceModeTabs{display:flex;gap:8px;flex-wrap:wrap}
+.practiceModeTabs button{display:inline-flex;align-items:center;gap:8px;padding:11px 14px;border:1px solid var(--line);border-radius:11px;background:#111426;color:#bfc6dd;font-weight:700}
+.practiceModeTabs button:hover,.practiceModeTabs button.selected{border-color:#8068d8;background:#251b47;color:#fff}
+.challengeBrief{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin:14px 0;padding:18px}
+.challengeBrief h2{margin:7px 0 6px;font-size:20px}
+.challengeBrief p{margin:0 0 10px;color:var(--muted)}
+.challengeBrief small{color:#c7cce0}
+.challengeBriefMeta{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.challengeBriefMeta span{border:1px solid var(--line);border-radius:999px;padding:6px 9px;color:#c7cce0;font-size:12px;white-space:nowrap}
+.challengeSearch{width:100%;margin:9px 0;padding:9px 10px;border:1px solid var(--line);border-radius:9px;background:#0d1020;color:var(--text);outline:0}
+.challengeSearch:focus{border-color:#8068d8}
+.challengeList{display:grid;gap:5px;max-height:420px;overflow:auto}
+.studioPanelTitle{display:flex;justify-content:space-between;align-items:center}
+.studioPanelTitle small{font-size:11px;color:var(--muted);font-weight:400}
+.challengeTitle{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.studioChallengeEmpty{padding:12px;color:var(--muted);font-size:12px;text-align:center}
+@media(max-width:900px){.practiceIntro,.challengeBrief{display:block}.practiceModeTabs{margin-top:18px}.challengeBriefMeta{justify-content:flex-start;margin-top:14px}}
+.questionPracticeStudio .studioGrid{grid-template-columns:250px minmax(0,1fr) 330px;grid-template-rows:minmax(430px,1fr) 260px}
+.questionPracticeStudio .questionToolbarActions{display:none}
+.questionActionBar{display:flex;gap:8px;padding:9px;border-bottom:1px solid var(--line);background:#0c0f1d}
+.questionActionBar>*{flex:1;min-width:0;white-space:nowrap}
+.questionPracticeStudio .studioExplorer{grid-column:1;grid-row:1 / span 2;min-height:700px;overflow:hidden}
+.questionPracticeStudio .studioEditor{grid-column:2;grid-row:1;min-height:430px}
+.questionPracticeStudio .studioOutput{grid-column:2;grid-row:2;min-height:260px}
+.questionPracticeStudio .questionTutor{grid-column:3;grid-row:1 / span 2;min-height:700px}
+.questionNavigator{display:flex;flex-direction:column;height:100%;min-height:0}
+.questionNavigator .challengeList{flex:0 1 auto;height:420px;min-height:180px;max-height:420px;overflow-y:auto;overflow-x:hidden;padding:0 3px 8px 0;overscroll-behavior:contain;scrollbar-width:thin}
+.studioChallengeItem{border-radius:8px;min-width:0}
+.studioChallengeItem.active{background:#171b30}
+.studioChallengeItem.active .studioChallenge{background:transparent}
+.questionNavigatorHint{border-top:1px solid var(--line);padding:12px 5px 0;color:#727b99;font-size:11px;line-height:1.45}
+.studioChallengeItem{min-width:0}
+.studioChallenge{min-height:44px}
+.studioChallenge .challengeTitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.studioChallenge small{max-width:95px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 0 auto}
+.questionDescription{margin:6px 0 4px;padding:12px;border:1px solid #3b3560;border-radius:10px;background:#0d1020;min-width:0;max-width:100%;overflow-wrap:anywhere}
+.questionBriefSection{margin-bottom:11px}
+.questionBriefSection strong,.questionExpected strong{display:block;color:#d9d1ff;font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.questionDescription p{margin:6px 0;color:var(--muted);font-size:12px;line-height:1.5;white-space:normal}
+.questionExpected{display:grid;gap:6px;padding-top:10px;border-top:1px solid var(--line)}
+.questionExpected code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;color:#b7f3ce;background:#13271f;border:1px solid #276749;border-radius:7px;padding:8px;font:11px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}
+.studioOutputLabel{display:inline-flex;align-items:center;gap:6px;color:#fff;font-size:12px;padding:7px 9px}
+.questionTutor{display:flex;flex-direction:column;gap:12px;padding:14px;border:1px solid var(--line);background:#101324;border-radius:14px;overflow:hidden}
+.questionTutor .tutorTop{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.questionTutor .tutorBrand{display:flex;align-items:center;gap:9px;min-width:0}
+.questionTutor .tutorBrand b,.questionTutor .tutorBrand small{display:block}
+.questionTutor .tutorBrand small{color:var(--muted);font-size:10px;margin-top:3px}
+.questionTutor .tutorIcon{display:grid;place-items:center;width:34px;height:34px;border-radius:10px;background:#281d4d;color:#c4b5fd}
+.questionTutor .tutorModeTabs{display:flex;gap:5px}
+.questionTutor .tutorModeTabs button{flex:1;border:1px solid var(--line);border-radius:8px;background:#0d1020;color:#9da6bf;padding:8px 6px;font-size:11px;font-weight:700}
+.questionTutor .tutorModeTabs button.active{background:#2a1d4a;border-color:#7952c8;color:#fff}
+.questionTutor .tutorAnswer{flex:1;min-height:180px;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#0b0e1a;padding:12px;color:#cdd3e4;font-size:12px;line-height:1.55;white-space:pre-wrap}
+.questionTutor .tutorInput{display:flex;align-items:end;gap:7px}
+.questionTutor .tutorInput textarea{flex:1;resize:vertical;min-height:54px;background:#0b0e1a;color:#fff;border:1px solid var(--line);border-radius:9px;padding:8px;font-size:12px;outline:0}
+.questionTutor .tutorInput textarea:focus{border-color:#7952c8}
+.questionTutor .tutorInput .primary{width:38px;height:38px;padding:0}
+.tutorLiveHint{color:#7f88a4;font-size:10px;line-height:1.4}
+@media(max-width:1150px){.questionPracticeStudio .studioGrid{grid-template-columns:220px minmax(0,1fr);grid-template-rows:auto auto auto}.questionPracticeStudio .studioExplorer{grid-column:1;grid-row:1 / span 2}.questionPracticeStudio .studioEditor{grid-column:2;grid-row:1}.questionPracticeStudio .studioOutput{grid-column:2;grid-row:2}.questionPracticeStudio .questionTutor{grid-column:1 / -1;grid-row:3;min-height:360px}}
+@media(max-width:700px){.questionPracticeStudio .studioGrid{display:flex;flex-direction:column}.questionPracticeStudio .studioExplorer{min-height:280px;max-height:440px}.questionNavigator .challengeList{height:300px;max-height:300px}.questionPracticeStudio .studioEditor{min-height:430px}.questionPracticeStudio .studioOutput,.questionPracticeStudio .questionTutor{min-height:340px}}
