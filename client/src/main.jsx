@@ -7,6 +7,8 @@ import React, {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
+import { buildWebPreview, formatPredictedTerminal } from "./code-runner.js";
+import "./runner.css";
 import {
   BrowserRouter,
   useLocation,
@@ -1110,25 +1112,6 @@ const safeLoad = (key, fallback) => {
     return fallback;
   }
 };
-const webPreview = (files) => {
-  const source = Object.fromEntries(
-    files.map((f) => [f.path || f.name, f.content]),
-  );
-  const htmlFile =
-    Object.keys(source).find((n) => /^(index|main)\.html?$/i.test(n)) ||
-    Object.keys(source).find((n) => /\.html?$/i.test(n));
-  const body = source[htmlFile] || "";
-  const cssText = Object.entries(source)
-    .filter(([n]) => /\.css$/i.test(n))
-    .map(([, v]) => v)
-    .join("\n");
-  const jsText = Object.entries(source)
-    .filter(([n]) => /\.(js|jsx|mjs|cjs)$/i.test(n))
-    .map(([, v]) => v)
-    .join("\n")
-    .replace(/<\/script/gi, "<\\/script");
-  return `<!doctype html><html><head><meta charset="UTF-8"><style>${cssText}</style></head><body>${body}<script>${jsText}<\/script></body></html>`;
-};
 function WorkspaceTree({
   files,
   folders,
@@ -1244,16 +1227,36 @@ function WorkspaceEditor({
   const [stdin, setStdin] = useState("");
   const [busy, setBusy] = useState(false);
   const [controller, setController] = useState(null);
+  const [isAiEstimate, setIsAiEstimate] = useState(false);
   const [challenges, setChallenges] = useState([]);
   const [challenge, setChallenge] = useState(null);
   const [challengeQuery, setChallengeQuery] = useState("");
   const [review, setReview] = useState(null);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [dialog, setDialog] = useState(null);
+  const previewFrameRef = useRef(null);
   useEffect(
     () => localStorage.setItem(storageKey, JSON.stringify(workspace)),
     [workspace, storageKey],
   );
+  useEffect(() => {
+    const handlePreviewMessage = (event) => {
+      if (
+        event.source !== previewFrameRef.current?.contentWindow ||
+        event.data?.type !== "learny-preview-console" ||
+        typeof event.data.message !== "string" ||
+        !["log", "info", "warn", "error"].includes(event.data.level)
+      ) {
+        return;
+      }
+      setOutput((current) =>
+        `${current}${current ? "\n" : ""}${event.data.message}`.slice(-20_000),
+      );
+      if (event.data.level === "error") setStatus("Runtime error");
+    };
+    window.addEventListener("message", handlePreviewMessage);
+    return () => window.removeEventListener("message", handlePreviewMessage);
+  }, []);
   useEffect(() => {
     if (showChallenges)
       api("/practice")
@@ -1263,7 +1266,7 @@ function WorkspaceEditor({
   const files = workspace.files || [];
   const active = files.find((f) => f.path === activePath) || files[0];
   const activeLanguage = active ? languageOf(active.path) : "";
-  const hasHtmlActive = activeLanguage === "html";
+  const hasWebActive = ["html", "css", "javascript"].includes(activeLanguage);
   const filteredChallenges = challenges.filter((item) =>
     `${item.title} ${item.description} ${item.courseTitle} ${item.difficulty}`
       .toLowerCase()
@@ -1280,7 +1283,9 @@ function WorkspaceEditor({
     }));
   const selectFile = (path) => {
     setActivePath(path);
-    setShowPreview(languageOf(path) === "html");
+    setShowPreview(
+      ["html", "css", "javascript"].includes(languageOf(path)),
+    );
   };
   const submitDialog = (value) => {
     const { mode, old, isFolder } = dialog || {};
@@ -1382,8 +1387,16 @@ function WorkspaceEditor({
     if (busy || !active) return;
     setBusy(true);
     setOutput("");
-    setStatus("AI is checking code before run…");
+    setIsAiEstimate(false);
     const language = activeLanguage;
+    if (["html", "css", "javascript"].includes(language)) {
+      setStatus("Starting sandboxed browser preview…");
+      setPreview(buildWebPreview(files));
+      setShowPreview(true);
+      setBusy(false);
+      return;
+    }
+    setStatus("AI is checking code before run…");
     const code = files.map((f) => `// ${f.path}\n${f.content}`).join("\n\n");
     try {
       const gate = await api("/practice/preflight", {
@@ -1410,14 +1423,6 @@ function WorkspaceEditor({
       return;
     }
     setStatus("Running…");
-    if (language === "html") {
-      setPreview(webPreview(files));
-      setShowPreview(true);
-      setOutput("Preview updated in a sandboxed iframe.");
-      setStatus("Finished");
-      setBusy(false);
-      return;
-    }
     if (!SERVER_LANGUAGES.has(language)) {
       setOutput(
         `Cannot run .${extensionOf(active.path) || "unknown"} files safely. This extension is not supported.`,
@@ -1444,17 +1449,20 @@ function WorkspaceEditor({
           .filter(Boolean)
           .join(r.stdout && r.stderr ? "\n" : "") ||
         (r.simulated ? "No output was predicted." : "Process completed without output.");
+      setIsAiEstimate(Boolean(r.simulated && !r.blocked));
       setOutput(
-        r.simulated
-          ? `${r.simulationLabel || "AI-predicted output — not executed"}\n${runOutput}${r.explanation ? `\n\n${r.explanation}` : ""}`
-          : runOutput,
+        r.blocked
+          ? `Execution blocked: ${runOutput}`
+          : r.simulated
+            ? formatPredictedTerminal(r, language)
+            : runOutput,
       );
       setShowPreview(false);
       setStatus(
         r.blocked
           ? "Blocked by AI review"
           : r.simulated
-            ? "AI prediction (not run)"
+            ? "AI estimate (not executed)"
             : r.timedOut
               ? "Timed out"
               : r.exitCode === 0
@@ -1783,7 +1791,9 @@ function WorkspaceEditor({
             <div className="studioStatus">
               <span
                 className={
-                  status === "Failed" || status === "Unsupported"
+                  status === "Failed" ||
+                  status === "Unsupported" ||
+                  status === "Runtime error"
                     ? "statusError"
                     : ""
                 }
@@ -1799,24 +1809,30 @@ function WorkspaceEditor({
           <section className="studioOutput panel">
             <div className="studioOutputHead">
               <div className="studioOutputTabs">
-                {hasHtmlActive && <button
+                {hasWebActive && <button
                   className={!showPreview ? "active" : ""}
                   onClick={() => setShowPreview(false)}
                 >
                   <TerminalSquare size={15} /> Terminal
                 </button>}
-                {hasHtmlActive && <button
+                {hasWebActive && <button
                   className={showPreview ? "active" : ""}
                   onClick={() => setShowPreview(true)}
                 >
                   <Eye size={15} /> Preview
                 </button>}
-                {!hasHtmlActive && <span className="studioOutputLabel"><TerminalSquare size={15} /> Terminal output</span>}
+                {!hasWebActive && <span className="studioOutputLabel"><TerminalSquare size={15} /> Terminal output</span>}
+                {isAiEstimate && (
+                  <span className="studioSimulationNotice">
+                    AI estimate · not executed
+                  </span>
+                )}
               </div>
               <button
                 className="iconBtn"
                 onClick={() => {
                   setOutput("");
+                  setIsAiEstimate(false);
                   setPreview("");
                   setStatus("Ready");
                 }}
@@ -1825,13 +1841,15 @@ function WorkspaceEditor({
                 <Trash2 size={15} />
               </button>
             </div>
-            {showPreview && hasHtmlActive ? (
+            {showPreview && hasWebActive ? (
               <div className="studioPreviewWrap">
                 {preview ? (
                   <iframe
+                    ref={previewFrameRef}
                     title="Sandboxed project preview"
                     sandbox="allow-scripts"
                     srcDoc={preview}
+                    onLoad={() => setStatus("Finished")}
                   />
                 ) : (
                   <div className="studioEmptyOutput">
@@ -1842,7 +1860,12 @@ function WorkspaceEditor({
               </div>
             ) : (
               <div className="studioTerminal">
-                <pre>{output || "Run your project to see output here."}</pre>
+                <pre>
+                  {output ||
+                    (hasWebActive
+                      ? "Browser console is empty. Use console.log() in your JavaScript to see output here."
+                      : "Run your project to see output here.")}
+                </pre>
                 <label className="stdinBox">
                   <span>Standard input (optional)</span>
                   <textarea

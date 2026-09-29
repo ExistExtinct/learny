@@ -36,5 +36,6 @@
 - [x] Practice challenges
 - [x] Resizable editor/terminal split
 - [x] Desktop sidebar collapse and mobile navigation drawer
-- [x] Sandboxed JavaScript/HTML practice
+- [x] Real HTML/CSS/JavaScript browser preview with captured console output in a network-restricted iframe
+- [x] Local execution of other supported languages in Docker; Vercel displays clearly labeled AI-predicted output without claiming it was executed
 - [x] Python/Node server execution disabled for safety
