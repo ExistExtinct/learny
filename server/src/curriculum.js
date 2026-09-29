@@ -50,68 +50,68 @@ function projectRows(course, lesson) {
   }));
 }
 
-export function ensureCurriculum(db) {
-  db.exec(`CREATE TABLE IF NOT EXISTS lesson_projects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    lesson_id INTEGER NOT NULL REFERENCES lessons(id) ON DELETE CASCADE,
-    title TEXT NOT NULL,
-    difficulty TEXT NOT NULL,
-    description TEXT NOT NULL,
-    requirements TEXT NOT NULL,
-    order_no INTEGER NOT NULL,
-    UNIQUE(lesson_id, order_no)
-  );`);
+async function insertMany(db, table, columns, rows, conflict = '') {
+  if (!rows.length) return;
+  const values = [];
+  const tuples = rows.map(row => {
+    const start = values.length;
+    values.push(...row);
+    return `(${row.map((_, index) => `$${start + index + 1}`).join(',')})`;
+  });
+  await db.query(`INSERT INTO ${table}(${columns}) VALUES ${tuples.join(',')} ${conflict}`, values);
+}
 
-  const courses = db.prepare('SELECT * FROM courses ORDER BY id').all();
-  const insertLesson = db.prepare(`INSERT OR IGNORE INTO lessons
-    (course_id, slug, title, summary, content, order_no, xp, level, objectives, example, practice_prompt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-  const insertProject = db.prepare(`INSERT OR IGNORE INTO lesson_projects
-    (lesson_id, title, difficulty, description, requirements, order_no)
-    VALUES (?, ?, ?, ?, ?, ?)`);
-
-  const addCourse = db.transaction((course) => {
+export async function ensureCurriculum(db) {
+  const courses = await db.query('SELECT * FROM courses ORDER BY id');
+  for (const course of courses) {
     const topics = TOPICS[course.slug] || TOPICS['web-fundamentals'];
-    const existingCounts = Object.fromEntries(db.prepare('SELECT level, COUNT(*) AS count FROM lessons WHERE course_id=? GROUP BY level').all(course.id).map(row => [row.level, row.count]));
-    const existingMaxOrder = db.prepare('SELECT COALESCE(MAX(order_no), 0) AS maxOrder FROM lessons WHERE course_id=?').get(course.id).maxOrder;
-    let nextOrder = existingMaxOrder;
+    const existingCounts = Object.fromEntries((await db.query(
+      'SELECT level, COUNT(*) AS count FROM lessons WHERE course_id=$1 GROUP BY level', [course.id]
+    )).map(row => [row.level, Number(row.count)]));
+    const maxRow = (await db.query('SELECT COALESCE(MAX(order_no), 0) AS max_order FROM lessons WHERE course_id=$1', [course.id]))[0];
+    let nextOrder = Number(maxRow.max_order);
+    const newLessons = [];
     LEVELS.forEach(({ name: level }, levelIndex) => {
       const needed = Math.max(0, 20 - (existingCounts[level] || 0));
       for (let i = 0; i < needed; i += 1) {
         const topic = topics[(levelIndex * 6 + i) % topics.length];
-        const globalIndex = levelIndex * 20 + i;
         const title = `${topic[0].toUpperCase()}${topic.slice(1)} ${level} Workshop`;
         const lessonSlug = `${course.slug}-${slug(level)}-${String(i + 1).padStart(2, '0')}-${slug(topic)}`;
-        const content = lessonContent(course, topic, level, globalIndex);
         nextOrder += 1;
-        insertLesson.run(course.id, lessonSlug, title, `Learn ${topic} through a guided ${level.toLowerCase()} project.`, content, nextOrder, 20 + levelIndex * 5, level, `Explain ${topic}, apply it in a small example, and test an edge case.`, `// Build a small ${course.title} example using ${topic}`, `Create a working example of ${topic}, then describe one edge case and how your solution handles it.`);
-        const lesson = db.prepare('SELECT id FROM lessons WHERE slug=?').get(lessonSlug);
-        for (const [projectIndex, project] of projectRows(course, { title }).entries()) insertProject.run(lesson.id, project.title, project.difficulty, project.description, project.requirements, projectIndex + 1);
+        newLessons.push([
+          course.id, lessonSlug, title,
+          `Learn ${topic} through a guided ${level.toLowerCase()} project.`,
+          lessonContent(course, topic, level, levelIndex * 20 + i),
+          nextOrder, 20 + levelIndex * 5, level,
+          `Explain ${topic}, apply it in a small example, and test an edge case.`,
+          `// Build a small ${course.title} example using ${topic}`,
+          `Create a working example of ${topic}, then describe one edge case and how your solution handles it.`
+        ]);
       }
-
     });
-    const lessons = db.prepare('SELECT id, title FROM lessons WHERE course_id=?').all(course.id);
-    const refreshContent = db.prepare('UPDATE lessons SET content=? WHERE id=? AND length(content)<2000');
+    await insertMany(db, 'lessons',
+      'course_id,slug,title,summary,content,order_no,xp,level,objectives,example,practice_prompt',
+      newLessons, 'ON CONFLICT(slug) DO NOTHING');
+
+    const lessons = await db.query('SELECT id, title FROM lessons WHERE course_id=$1 ORDER BY order_no', [course.id]);
+    const projectRowsToInsert = [];
     for (const lesson of lessons) {
-      const existing = db.prepare('SELECT level, content FROM lessons WHERE id=?').get(lesson.id);
-      if (existing.content.length < 2000) refreshContent.run(lessonContent(course, lesson.title, existing.level, 0), lesson.id);
-      const projectCount = db.prepare('SELECT COUNT(*) AS count FROM lesson_projects WHERE lesson_id=?').get(lesson.id).count;
-      if (projectCount === 0) {
-        for (const [projectIndex, project] of projectRows(course, lesson).entries()) insertProject.run(lesson.id, project.title, project.difficulty, project.description, project.requirements, projectIndex + 1);
+      const projects = projectRows(course, lesson);
+      for (const [index, project] of projects.entries()) {
+        projectRowsToInsert.push([
+          lesson.id, project.title, project.difficulty,
+          project.description, project.requirements, index + 1
+        ]);
       }
     }
-  });
-  for (const course of courses) addCourse(course);
+    await insertMany(db, 'lesson_projects',
+      'lesson_id,title,difficulty,description,requirements,order_no',
+      projectRowsToInsert, 'ON CONFLICT(lesson_id,order_no) DO NOTHING');
+  }
 }
 
-export function ensurePracticeCatalog(db) {
-  const courses = db.prepare('SELECT id, slug, title FROM courses ORDER BY id').all();
-  const refreshGenerated = db.prepare(`UPDATE challenges
-    SET description=?, expected=?
-    WHERE title=?`);
-  const insert = db.prepare(`INSERT OR IGNORE INTO challenges
-    (course_id, title, description, starter_code, expected, difficulty, files)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`);
+export async function ensurePracticeCatalog(db) {
+  const courses = await db.query('SELECT id, slug, title FROM courses ORDER BY id');
   const topics = [
     'a greeting formatter', 'a score calculator', 'a word counter', 'a temperature converter',
     'a shopping total', 'a palindrome checker', 'a password strength meter',
@@ -133,6 +133,7 @@ export function ensurePracticeCatalog(db) {
     if (course.slug === 'sql') return [{ path: 'query.sql', content: '-- write your query here\nSELECT 1;' }];
     return [{ path: 'script.js', content: 'function solve(value) {\n  // write your solution\n}\n\nconsole.log(solve("Learny"));' }];
   };
+  const practiceRows = [];
   for (let index = 0; index < 100; index += 1) {
     const course = courses[index % courses.length];
     const topic = topics[index % topics.length];
@@ -140,8 +141,7 @@ export function ensurePracticeCatalog(db) {
     const title = `Practice ${String(index + 1).padStart(3, '0')}: ${topic}`;
     const description = `Build ${topic}. Your solution should accept the stated input, produce a predictable result, and communicate invalid input clearly. Validate the normal case, empty input, unexpected values, and repeated use. Keep the implementation readable and explain one design decision.`;
     const expected = `Expected output: a correct ${topic} result for valid input; a safe, intentional response for empty or invalid input; and no uncaught errors when the operation is repeated.`;
-    refreshGenerated.run(description, expected, title);
-    insert.run(
+    practiceRows.push([
       course.id,
       title,
       description,
@@ -149,6 +149,10 @@ export function ensurePracticeCatalog(db) {
       expected,
       difficulty(index),
       JSON.stringify(files),
-    );
+    ]);
   }
+  await insertMany(db, 'challenges',
+    'course_id,title,description,starter_code,expected,difficulty,files',
+    practiceRows,
+    `ON CONFLICT DO NOTHING`);
 }

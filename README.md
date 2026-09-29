@@ -1,6 +1,6 @@
 # Learny 2.0 — AI Learning & Coding Workspace
 
-Learny is a full-stack React/Vite + Express + SQLite learning application with secure authentication, email verification, password reset, optional Google OAuth, an AI tutor, personal notes, quizzes, AI summaries/explanations/code generation, and a browser-safe coding practice lab.
+Learny is a full-stack React/Vite + Express + managed PostgreSQL learning application with secure authentication, email verification, password reset, optional Google OAuth, an AI tutor, personal notes, quizzes, AI summaries/explanations/code generation, and a coding practice lab.
 
 ## Recommended versions
 
@@ -9,7 +9,7 @@ Learny is a full-stack React/Vite + Express + SQLite learning application with s
 - React 19.1.1
 - Vite 7.1.3
 - Express 5.1.0
-- better-sqlite3 13.0.3
+- PostgreSQL (managed provider recommended for deployment)
 - Gemini model: **gemini-3.6-flash**
 
 Vite 7 requires Node 20.19+ or 22.12+. Learny pins the project to the Node 22 line to avoid mixing major Node versions.
@@ -75,13 +75,14 @@ to:
 server\.env
 ```
 
-At minimum put your Gemini key in:
+Configure a managed PostgreSQL connection and, optionally, an AI key. `DATABASE_URL` is required to run the API; frontend builds and the targeted tests do not connect to a database.
 
 ```env
 PORT=4000
 CLIENT_ORIGIN=http://127.0.0.1:5173
 NODE_ENV=development
-EMAIL_VERIFICATION_REQUIRED=true
+DATABASE_URL=postgresql://user:password@host:5432/database?sslmode=require
+EMAIL_VERIFICATION_REQUIRED=false
 GEMINI_API_KEY=YOUR_KEY_HERE
 GEMINI_MODEL=gemini-3.6-flash
 ```
@@ -94,7 +95,7 @@ Email verification is enabled by default.
 
 ### Development without SMTP
 
-You can leave SMTP empty. Registration will show a one-time development verification URL in the Learny UI. Open that link to verify the account.
+Local development skips email verification automatically when SMTP is not configured. Set `EMAIL_VERIFICATION_REQUIRED=false` in `server/.env` to make this explicit. Production still requires SMTP when email verification is enabled.
 
 ### Real email verification
 
@@ -181,16 +182,16 @@ The Notes page also has an **AI note maker**.
 
 ## 9. Code Studio and Docker sandbox
 
-The Practice route is now a VS Code-style Code Studio with:
+The Practice route is a VS Code-style Code Studio with:
 
 - multi-file explorer and editor tabs
 - HTML/CSS/JavaScript live preview in a sandboxed iframe
 - terminal output and optional standard input
-- Python, Java, C++, C, Go, Rust, Ruby and Node.js container runners
+- Python, Java, C++, C, Go, Rust, Ruby and Node.js runners
 - Run/Stop controls and execution status
 - disposable Docker execution with no network, no host mounts, a non-root user, read-only root filesystem, CPU/memory/PID limits, timeouts and output limits
 
-Install and start Docker Desktop before using server-side languages. Learny intentionally fails closed when Docker is unavailable; it never runs submitted server-side code directly on the host.
+For local development, install and start Docker Desktop before using server-side languages. Learny runs those languages only inside disposable, resource-limited Docker containers and never directly on the host.
 
 The first run may need the language images:
 
@@ -204,7 +205,7 @@ docker pull rust:1.81-alpine
 docker pull ruby:3.3-alpine
 ```
 
-For public deployment, use a separate execution worker host with Docker daemon isolation, monitoring and quotas.
+Vercel Functions cannot run Docker. On Vercel, server-side code is **not executed**: the API repeats the AI safety/quality preflight, asks the configured AI provider to predict likely output, and labels the response as simulated/not executed. Predictions can be inaccurate and are not a substitute for running tests. HTML preview remains in the browser's sandboxed iframe. For real server-side execution in production, use a separate isolated worker service with Docker daemon isolation, monitoring and quotas.
 
 ## 10. Authentication
 
@@ -236,7 +237,39 @@ GOOGLE_REDIRECT_URI=http://127.0.0.1:4000/api/auth/google/callback
 
 Use the exact callback URL in Google Cloud Console.
 
-## 12. Tests and build
+## 12. Deploy to Vercel
+
+Learny keeps its React/Vite frontend and Express API; it does not require a Next.js migration. The Vercel deployment uses the root `vercel.json` to build `client/dist`, route `/api/*` to the Express function, and serve the Vite SPA for frontend routes.
+
+1. Provision a **managed PostgreSQL** database with your preferred provider. Copy its serverless/pooler connection URL if offered. The URL must be available to Vercel Functions and use TLS; do not commit credentials.
+2. Import this repository into Vercel with the repository root as the project root. Use the configured build command `npm run build` and output directory `client/dist` (already in `vercel.json`).
+3. Add Vercel environment variables for **Production** (and Preview if wanted):
+
+   ```env
+   NODE_ENV=production
+   DATABASE_URL=postgresql://...
+   DATABASE_SSL_REJECT_UNAUTHORIZED=true
+   CLIENT_ORIGIN=https://your-project.vercel.app
+   GEMINI_API_KEY=...
+   GEMINI_MODEL=gemini-3.6-flash
+   EMAIL_VERIFICATION_REQUIRED=true
+   SMTP_HOST=...
+   SMTP_PORT=587
+   SMTP_SECURE=false
+   SMTP_USER=...
+   SMTP_PASS=...
+   MAIL_FROM=...
+   ```
+
+   Add `OPENAI_API_KEY`/`OPENAI_MODEL` only if using OpenAI. Configure the email variables if verification or password reset emails are enabled. `DATABASE_URL`, AI keys and SMTP credentials belong only in server-side Vercel environment settings—never in Vite/client variables.
+4. If enabling Google sign-in, configure both `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, then register the exact callback URL `https://your-project.vercel.app/api/auth/google/callback` in Google Cloud and set `GOOGLE_REDIRECT_URI` to that URL. Vercel deployment URLs are accepted for origin checks automatically; set `CLIENT_ORIGIN` to your production custom domain if you use one. Google OAuth still requires an exact registered callback URL.
+5. Deploy. On the first API request, the server applies versioned SQL migrations and seeds the course/practice catalog idempotently. Check `https://your-project.vercel.app/api/health` and then test registration, email delivery and OAuth as configured.
+
+Schema initialization is automatic and repeatable; it does not copy data from a local SQLite database. The ignored `server/data/learny.sqlite` file, if present from earlier local development, is not read or migrated. Treat any data migration as a separate, explicitly backed-up operation.
+
+Vercel builds and the targeted server tests do not require a live database URL. Local API runtime and live database integration checks do require `DATABASE_URL`; the Vercel code-run endpoint also needs at least one configured AI provider. No Docker daemon is available inside Vercel Functions, so returned server-language output is an AI prediction, never an execution result.
+
+## 13. Tests and build
 
 Run:
 
@@ -252,7 +285,7 @@ Build only:
 npm run build
 ```
 
-## 13. Important Gemini troubleshooting
+## 14. Important Gemini troubleshooting
 
 If Tutor says `Gemini request failed`, do not immediately replace the API key.
 
@@ -272,6 +305,6 @@ Model: gemini-3.6-flash
 
 Then check the server terminal. Learny now logs the upstream Gemini HTTP status and provider message instead of hiding the reason behind a generic 502.
 
-## 14. Security
+## 15. Security
 
-AI keys are server-side only. User code is not executed on the Node server. JavaScript/HTML practice is placed in a sandboxed iframe. For production code execution, use an isolated sandbox/container with resource limits, no host filesystem access, no privileged execution, no default outbound network, and automatic cleanup.
+AI keys and database credentials are server-side only. Vercel code-run requests are AI-simulated and never execute submitted server-side code. Locally, submitted server-side code runs only in a Docker container with resource limits, no host filesystem access, no privileged execution, no default outbound network, and automatic cleanup. JavaScript/HTML preview is placed in a sandboxed iframe.

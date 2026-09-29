@@ -33,7 +33,7 @@ function validatePath(filePath) {
   }
 }
 
-function normalizeRequest(input) {
+export function normalizeRequest(input) {
   if (!input || typeof input !== 'object' || typeof input.language !== 'string') throw fail('Language is required');
   const language = input.language.trim().toLowerCase();
   const spec = LANGUAGES[language];

@@ -9,18 +9,23 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import db from './db.js';
+import db, { initDb } from './db.js';
 import {
  hashPassword, verifyPassword, createSession, createEmailVerificationToken,
  createPasswordResetToken, setAuthCookie, clearAuthCookie, authRequired,
  consumeToken, markTokenUsed, revokeUserSessions, safeAuthUser, randomToken
 } from './auth.js';
 import { executeCode } from './code-execution.js';
+import { simulateCode } from './code-simulation.js';
+import { containsUnsafeCode } from './code-safety.js';
+import { shouldRequireEmailVerification } from './auth-config.js';
 
 const app = express();
 const isProd = process.env.NODE_ENV === 'production';
+const isVercel = Boolean(process.env.VERCEL);
 app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy: isProd ? undefined : false }));
+if (isVercel) app.set('trust proxy', 1);
 app.use(cors({ origin: allowedFrontendOrigins(), credentials:true }));
 app.use(express.json({ limit:'100kb' }));
 app.use(cookieParser());
@@ -36,23 +41,34 @@ const themeSchema = z.object({ theme:z.enum(['dark','light','system']) });
 const safeUser = safeAuthUser;
 function allowedFrontendOrigins() {
  const configured = process.env.CLIENT_ORIGIN?.trim();
+ const origins = new Set(configured
+  ? [configured]
+  : isProd ? ['http://127.0.0.1:5173'] : ['http://127.0.0.1:5173','http://localhost:5173']);
  if (configured) {
   try {
    const url = new URL(configured);
    if (!isProd && (url.hostname === 'localhost' || url.hostname === '127.0.0.1')) {
     const alternate = new URL(configured);
     alternate.hostname = url.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
-    return [configured, alternate.origin];
+    origins.add(alternate.origin);
    }
-  } catch {
-   return [configured];
+  } catch (error) {
+   console.error('Invalid CLIENT_ORIGIN:', error);
   }
-  return [configured];
  }
- return isProd ? ['http://127.0.0.1:5173'] : ['http://127.0.0.1:5173','http://localhost:5173'];
+ if (isVercel && process.env.VERCEL_URL) origins.add(`https://${process.env.VERCEL_URL}`);
+ return [...origins];
 }
 function frontendOrigin() { return allowedFrontendOrigins()[0]; }
+function configuredAiProvider() { return process.env.GEMINI_API_KEY?.trim() ? 'gemini' : 'openai'; }
 function smtpReady() { return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS); }
+function emailVerificationEnabled() {
+ return shouldRequireEmailVerification({
+  required: process.env.EMAIL_VERIFICATION_REQUIRED === 'true',
+  smtpConfigured: smtpReady(),
+  isProduction: isProd
+ });
+}
 function mailer() { return nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||587),secure:process.env.SMTP_SECURE==='true',auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}}); }
 async function sendMail(to, subject, text, html) {
  if(!smtpReady()) throw new Error('Email delivery is not configured. Add SMTP_HOST, SMTP_USER and SMTP_PASS to server/.env.');
@@ -72,33 +88,38 @@ function verificationEmail(link) {
 }
 function requireSameOrigin(req,res,next) { const origin=req.get('origin'); if(origin && !allowedFrontendOrigins().includes(origin)) return res.status(403).json({error:'Cross-site request blocked'}); next(); }
 function requireExecutionSameOrigin(req,res,next) { const origin=req.get('origin'); if(!origin || !allowedFrontendOrigins().includes(origin)) return res.status(403).json({error:'Same-origin request required'}); next(); }
-function cleanupAuthTokens(){ db.prepare("DELETE FROM auth_tokens WHERE expires_at <= CURRENT_TIMESTAMP OR used_at IS NOT NULL").run(); }
-setInterval(cleanupAuthTokens, 60*60*1000).unref();
-function logActivity(userId,type,label,xp=0) { db.prepare('INSERT INTO activity(user_id,type,label,xp) VALUES(?,?,?,?)').run(userId,type,label,xp); }
+async function cleanupAuthTokens(){ await (db.prepare("DELETE FROM auth_tokens WHERE expires_at <= CURRENT_TIMESTAMP OR used_at IS NOT NULL").run()); }
+if (!isVercel) setInterval(() => cleanupAuthTokens().catch(error => console.error('Auth-token cleanup failed:', error)), 60*60*1000).unref();
+async function logActivity(userId,type,label,xp=0) { await (db.prepare('INSERT INTO activity(user_id,type,label,xp) VALUES(?,?,?,?)').run(userId,type,label,xp)); }
+if (process.env.EMAIL_VERIFICATION_REQUIRED === 'true' && !smtpReady() && !isProd) {
+ console.warn('SMTP is not configured; email verification is skipped in local development.');
+}
 
-app.get('/api/health', (_req,res)=>res.json({ok:true,service:'Learny API',geminiConfigured:Boolean(process.env.GEMINI_API_KEY),geminiModel:process.env.GEMINI_MODEL||'gemini-3.6-flash',emailConfigured:smtpReady()}));
+app.get('/api/health', (_req,res)=>res.json({ok:true,service:'Learny API',geminiConfigured:Boolean(process.env.GEMINI_API_KEY),geminiModel:process.env.GEMINI_MODEL||'gemini-3.6-flash',emailConfigured:smtpReady(),emailVerificationRequired:emailVerificationEnabled()}));
 app.post('/api/auth/register', authLimiter, requireSameOrigin, async (req,res)=>{
  const parsed=registerSchema.safeParse(req.body);
  if(!parsed.success) return res.status(400).json({error:'Use a valid username, email, display name and an 8–72 character password.'});
  const {username,email,password,displayName}=parsed.data;
- if(process.env.EMAIL_VERIFICATION_REQUIRED === 'true' && !smtpReady()) return res.status(503).json({error:'Email verification is enabled but SMTP is not configured.'});
+ const normalizedUsername=username.toLowerCase();
+ const normalizedEmail=email.toLowerCase();
+ if(process.env.EMAIL_VERIFICATION_REQUIRED === 'true' && isProd && !smtpReady()) return res.status(503).json({error:'Email verification is enabled but SMTP is not configured.'});
  try {
-  const exists=db.prepare('SELECT id,username,email FROM users WHERE username=? OR email=?').get(username,email);
+  const exists=await (db.prepare('SELECT id,username,email FROM users WHERE LOWER(username)=LOWER(?) OR LOWER(email)=LOWER(?)').get(normalizedUsername,normalizedEmail));
   if(exists) return res.status(409).json({error:'Username or email is already registered'});
   const passwordHash=await hashPassword(password);
-  const verified = process.env.EMAIL_VERIFICATION_REQUIRED === 'true' ? 0 : 1;
-  const userId=db.prepare('INSERT INTO users(username,email,password_hash,display_name,email_verified) VALUES(?,?,?,?,?)')
-    .run(username,email,passwordHash,displayName,verified).lastInsertRowid;
-  const row=db.prepare('SELECT * FROM users WHERE id=?').get(userId);
-  logActivity(row.id,'welcome','Joined Learny',0);
+  const verified = emailVerificationEnabled() ? 0 : 1;
+  const userId=(await (db.prepare('INSERT INTO users(username,email,password_hash,display_name,email_verified) VALUES(?,?,?,?,?)')
+    .run(normalizedUsername,normalizedEmail,passwordHash,displayName,verified))).lastInsertRowid;
+  const row=await (db.prepare('SELECT * FROM users WHERE id=?').get(userId));
+  await logActivity(row.id,'welcome','Joined Learny',0);
   if(!verified){
-   const token=createEmailVerificationToken(row.id);
+   const token=await createEmailVerificationToken(row.id);
    const link=`${frontendOrigin()}/verify-email?token=${encodeURIComponent(token)}`;
    const email=verificationEmail(link);
    await sendMail(row.email,email.subject,email.text,email.html);
    return res.status(201).json({requiresVerification:true});
   }
-  const session=createSession(row.id); setAuthCookie(res,session);
+  const session=await createSession(row.id); setAuthCookie(res,session);
   res.status(201).json({user:safeUser(row)});
  } catch(e) {
   console.error('Register error',e);
@@ -108,25 +129,32 @@ app.post('/api/auth/register', authLimiter, requireSameOrigin, async (req,res)=>
 });
 app.post('/api/auth/login', authLimiter, requireSameOrigin, async (req,res)=>{
  const parsed=loginSchema.safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Invalid login details'});
- const row=db.prepare('SELECT * FROM users WHERE username=? COLLATE NOCASE OR email=? COLLATE NOCASE').get(parsed.data.identifier,parsed.data.identifier);
+ const identifier=parsed.data.identifier.toLowerCase();
+ const row=await (db.prepare('SELECT * FROM users WHERE LOWER(username)=LOWER(?) OR LOWER(email)=LOWER(?)').get(identifier,identifier));
  if(!row || !(await verifyPassword(parsed.data.password,row.password_hash))) return res.status(401).json({error:'Invalid username/email or password'});
- if(!row.email_verified && process.env.EMAIL_VERIFICATION_REQUIRED === 'true') return res.status(403).json({error:'Please verify your email before signing in.'});
- const session=createSession(row.id); setAuthCookie(res,session); res.json({user:safeUser(row)});
+ if(!row.email_verified && emailVerificationEnabled()) return res.status(403).json({error:'Please verify your email before signing in.'});
+ const session=await createSession(row.id); setAuthCookie(res,session); res.json({user:safeUser(row)});
 });
-app.post('/api/auth/logout', requireSameOrigin, (req,res)=>{
- const raw=req.cookies.learny_session; const session=consumeToken(raw,'session'); if(session) markTokenUsed(session.id);
+app.post('/api/auth/logout', requireSameOrigin, async (req,res)=>{
+ const raw=req.cookies.learny_session; const session=await consumeToken(raw,'session'); if(session) await markTokenUsed(session.id);
  clearAuthCookie(res); res.json({ok:true});
 });
 app.get('/api/auth/me', authRequired, (req,res)=>res.json({user:safeUser(req.user)}));
 
 async function executeCodeHandler(req,res) {
  try {
-  const result = await executeCode(req.body);
+  const result = isVercel
+   ? await simulateCode(req.body, { provider: configuredAiProvider(), callAI })
+   : await executeCode(req.body);
   res.json(result);
  } catch (error) {
   const status = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
   if (status >= 500) console.error('Code execution error:', error);
-  res.status(status).json({error: status === 503 ? error.message : (status === 400 ? error.message : 'Code execution failed')});
+  res.status(status).json({
+   error: status === 503 || status === 400 || status === 422 ? error.message : 'Code execution failed',
+   executed: false,
+   simulated: isVercel
+  });
  }
 }
 app.post('/api/execute', requireExecutionSameOrigin, authRequired, executionLimiter, executeCodeHandler);
@@ -135,19 +163,19 @@ app.post('/api/code/run', requireExecutionSameOrigin, authRequired, executionLim
 app.post('/api/auth/verify-email', authLimiter, requireSameOrigin, async (req,res)=>{
  const parsed=z.object({token:z.string().min(20).max(300)}).safeParse(req.body);
  if(!parsed.success) return res.status(400).json({error:'Invalid verification token'});
- const row=consumeToken(parsed.data.token,'verify_email');
+ const row=await consumeToken(parsed.data.token,'verify_email');
  if(!row) return res.status(400).json({error:'Verification link is invalid or expired.'});
- db.prepare('UPDATE users SET email_verified=1 WHERE id=?').run(row.user_id); markTokenUsed(row.id);
- const user=db.prepare('SELECT * FROM users WHERE id=?').get(row.user_id);
- setAuthCookie(res,createSession(user.id)); res.json({user:safeUser(user)});
+ await (db.prepare('UPDATE users SET email_verified=1 WHERE id=?').run(row.user_id)); await markTokenUsed(row.id);
+ const user=await (db.prepare('SELECT * FROM users WHERE id=?').get(row.user_id));
+ setAuthCookie(res,await createSession(user.id)); res.json({user:safeUser(user)});
 });
 app.post('/api/auth/resend-verification', authLimiter, requireSameOrigin, async (req,res)=>{
  const parsed=z.object({email:z.string().trim().email().max(160)}).safeParse(req.body);
  if(!parsed.success) return res.status(400).json({error:'Enter a valid email address'});
- const user=db.prepare('SELECT * FROM users WHERE email=? COLLATE NOCASE').get(parsed.data.email);
+ const user=await (db.prepare('SELECT * FROM users WHERE LOWER(email)=LOWER(?)').get(parsed.data.email));
  if(user && !user.email_verified){
-  db.prepare("UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE user_id=? AND type='verify_email' AND used_at IS NULL").run(user.id);
-  const token=createEmailVerificationToken(user.id);
+  await (db.prepare("UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE user_id=? AND type='verify_email' AND used_at IS NULL").run(user.id));
+  const token=await createEmailVerificationToken(user.id);
   const link=`${frontendOrigin()}/verify-email?token=${encodeURIComponent(token)}`;
   const email=verificationEmail(link);
   try {
@@ -161,10 +189,10 @@ app.post('/api/auth/resend-verification', authLimiter, requireSameOrigin, async 
 app.post('/api/auth/forgot-password', authLimiter, requireSameOrigin, async (req,res)=>{
  const parsed=z.object({email:z.string().trim().email().max(160)}).safeParse(req.body);
  if(!parsed.success) return res.status(400).json({error:'Enter a valid email address'});
- const user=db.prepare('SELECT * FROM users WHERE email=? COLLATE NOCASE').get(parsed.data.email);
+ const user=await (db.prepare('SELECT * FROM users WHERE LOWER(email)=LOWER(?)').get(parsed.data.email));
  if(user){
-  db.prepare("UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE user_id=? AND type='reset_password' AND used_at IS NULL").run(user.id);
-  const token=createPasswordResetToken(user.id);
+  await (db.prepare("UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE user_id=? AND type='reset_password' AND used_at IS NULL").run(user.id));
+  const token=await createPasswordResetToken(user.id);
   const link=`${frontendOrigin()}/reset-password?token=${encodeURIComponent(token)}`;
   await sendMail(user.email,'Reset your Learny password',`Reset your password:\n${link}\n\nThis link expires in 1 hour. If you did not request it, ignore this email.`);
  }
@@ -173,13 +201,13 @@ app.post('/api/auth/forgot-password', authLimiter, requireSameOrigin, async (req
 app.post('/api/auth/reset-password', authLimiter, requireSameOrigin, async (req,res)=>{
  const parsed=z.object({token:z.string().min(20).max(300),password:z.string().min(8).max(72)}).safeParse(req.body);
  if(!parsed.success) return res.status(400).json({error:'Password must be 8–72 characters.'});
- const row=consumeToken(parsed.data.token,'reset_password');
+ const row=await consumeToken(parsed.data.token,'reset_password');
  if(!row) return res.status(400).json({error:'Reset link is invalid or expired.'});
  const passwordHash=await hashPassword(parsed.data.password);
- db.prepare('UPDATE users SET password_hash=?,email_verified=1 WHERE id=?').run(passwordHash,row.user_id);
- markTokenUsed(row.id); revokeUserSessions(row.user_id);
- const user=db.prepare('SELECT * FROM users WHERE id=?').get(row.user_id);
- setAuthCookie(res,createSession(user.id)); res.json({user:safeUser(user)});
+ await (db.prepare('UPDATE users SET password_hash=?,email_verified=1 WHERE id=?').run(passwordHash,row.user_id));
+ await markTokenUsed(row.id); await revokeUserSessions(row.user_id);
+ const user=await (db.prepare('SELECT * FROM users WHERE id=?').get(row.user_id));
+ setAuthCookie(res,await createSession(user.id)); res.json({user:safeUser(user)});
 });
 
 app.get('/api/auth/google', authLimiter, (req,res)=>{
@@ -204,66 +232,78 @@ app.get('/api/auth/google/callback', async (req,res)=>{
   const tokens=await tokenResponse.json(); if(!tokenResponse.ok) throw new Error('Google token exchange failed');
   const infoResponse=await fetch('https://openidconnect.googleapis.com/v1/userinfo',{headers:{Authorization:`Bearer ${tokens.access_token}`}});
   const info=await infoResponse.json(); if(!infoResponse.ok || !info.sub || !info.email || info.email_verified !== true) throw new Error('Google profile lookup failed');
-  let user=db.prepare('SELECT * FROM users WHERE google_id=? OR email=? COLLATE NOCASE').get(info.sub,info.email);
+  info.email=info.email.toLowerCase();
+  let user=await (db.prepare('SELECT * FROM users WHERE google_id=? OR email=? COLLATE NOCASE').get(info.sub,info.email));
   if(user){
-   db.prepare('UPDATE users SET google_id=?,auth_provider=CASE WHEN auth_provider=\"password\" THEN \"google\" ELSE auth_provider END,email_verified=1,display_name=? WHERE id=?').run(info.sub,info.name||user.display_name,user.id);
-   user=db.prepare('SELECT * FROM users WHERE id=?').get(user.id);
+   await (db.prepare("UPDATE users SET google_id=?,auth_provider=CASE WHEN auth_provider='password' THEN 'google' ELSE auth_provider END,email_verified=1,display_name=? WHERE id=?").run(info.sub,info.name||user.display_name,user.id));
+   user=await (db.prepare('SELECT * FROM users WHERE id=?').get(user.id));
   } else {
-   const base=(info.email.split('@')[0]||'learner').replace(/[^a-zA-Z0-9_]/g,'_').slice(0,20)||'learner';
+   const base=(info.email.split('@')[0]||'learner').replace(/[^a-zA-Z0-9_]/g,'_').slice(0,20).toLowerCase()||'learner';
    let username=base, n=0;
-   while(db.prepare('SELECT 1 FROM users WHERE username=? COLLATE NOCASE').get(username)) username=`${base}_${++n}`;
+   while(await (db.prepare('SELECT 1 FROM users WHERE username=? COLLATE NOCASE').get(username))) username=`${base}_${++n}`;
    const randomPassword=await hashPassword(randomToken(32));
-   const userId=db.prepare('INSERT INTO users(username,email,password_hash,auth_provider,google_id,email_verified,display_name) VALUES(?,?,?,?,?,?,?)')
-     .run(username,info.email,randomPassword,'google',info.sub,1,info.name||username).lastInsertRowid;
-   user=db.prepare('SELECT * FROM users WHERE id=?').get(userId); logActivity(user.id,'welcome','Joined Learny with Google',0);
+   const userId=(await (db.prepare('INSERT INTO users(username,email,password_hash,auth_provider,google_id,email_verified,display_name) VALUES(?,?,?,?,?,?,?)')
+     .run(username,info.email,randomPassword,'google',info.sub,1,info.name||username))).lastInsertRowid;
+   user=await (db.prepare('SELECT * FROM users WHERE id=?').get(userId)); await logActivity(user.id,'welcome','Joined Learny with Google',0);
   }
-  setAuthCookie(res,createSession(user.id)); res.redirect(`${frontendOrigin()}/`);
+  setAuthCookie(res,await createSession(user.id)); res.redirect(`${frontendOrigin()}/`);
  } catch(e){ console.error('Google OAuth error',e); res.redirect(`${frontendOrigin()}/login?error=google_failed`); }
 });
-app.get('/api/dashboard', authRequired, (req,res)=>{
- const user=req.user; const total=db.prepare('SELECT COUNT(*) c FROM lessons').get().c; const done=db.prepare('SELECT COUNT(*) c FROM progress WHERE user_id=? AND completed=1').get(user.id).c;
- const courses=db.prepare(`SELECT c.*, COUNT(l.id) lessons, SUM(CASE WHEN p.completed=1 THEN 1 ELSE 0 END) completed FROM courses c LEFT JOIN lessons l ON l.course_id=c.id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? GROUP BY c.id ORDER BY c.id`).all(user.id);
- const activity=db.prepare('SELECT type,label,xp,created_at createdAt FROM activity WHERE user_id=? ORDER BY id DESC LIMIT 8').all(user.id);
- const next=db.prepare(`SELECT l.*, c.slug courseSlug, c.title courseTitle FROM lessons l JOIN courses c ON c.id=l.course_id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? WHERE COALESCE(p.completed,0)=0 ORDER BY c.id,l.order_no LIMIT 1`).get(user.id);
+app.get('/api/dashboard', authRequired, async (req,res)=>{
+ const user=req.user; const total=(await (db.prepare('SELECT COUNT(*) c FROM lessons').get())).c; const done=(await (db.prepare('SELECT COUNT(*) c FROM progress WHERE user_id=? AND completed=1').get(user.id))).c;
+ const courses=await (db.prepare(`SELECT c.*, COUNT(l.id) lessons, SUM(CASE WHEN p.completed=1 THEN 1 ELSE 0 END) completed FROM courses c LEFT JOIN lessons l ON l.course_id=c.id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? GROUP BY c.id ORDER BY c.id`).all(user.id));
+ const activity=await (db.prepare('SELECT type,label,xp,created_at createdAt FROM activity WHERE user_id=? ORDER BY id DESC LIMIT 8').all(user.id));
+ const next=await (db.prepare(`SELECT l.*, c.slug courseSlug, c.title courseTitle FROM lessons l JOIN courses c ON c.id=l.course_id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? WHERE COALESCE(p.completed,0)=0 ORDER BY c.id,l.order_no LIMIT 1`).get(user.id));
  res.json({user:safeUser(user),stats:{totalLessons:total,completedLessons:done,progress:total?Math.round(done/total*100):0},courses,activity,next});
 });
 
-app.get('/api/courses', authRequired, (req,res)=>{ const courses=db.prepare(`SELECT c.*,COUNT(l.id) lessons,SUM(CASE WHEN p.completed=1 THEN 1 ELSE 0 END) completed FROM courses c LEFT JOIN lessons l ON l.course_id=c.id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? GROUP BY c.id ORDER BY c.id`).all(req.user.id); res.json({courses}); });
-app.get('/api/courses/:slug', authRequired, (req,res)=>{
- const c=db.prepare('SELECT * FROM courses WHERE slug=?').get(req.params.slug); if(!c) return res.status(404).json({error:'Course not found'});
- const lessons=db.prepare(`SELECT l.id,l.slug,l.title,l.summary,l.level,l.objectives,l.example,l.practice_prompt practicePrompt,l.order_no orderNo,l.xp,COALESCE(p.completed,0) completed,COALESCE(p.bookmarked,0) bookmarked FROM lessons l LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? WHERE l.course_id=? ORDER BY l.order_no`).all(req.user.id,c.id);
+app.get('/api/courses', authRequired, async (req,res)=>{ const courses=await (db.prepare(`SELECT c.*,COUNT(l.id) lessons,SUM(CASE WHEN p.completed=1 THEN 1 ELSE 0 END) completed FROM courses c LEFT JOIN lessons l ON l.course_id=c.id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? GROUP BY c.id ORDER BY c.id`).all(req.user.id)); res.json({courses}); });
+app.get('/api/courses/:slug', authRequired, async (req,res)=>{
+ const c=await (db.prepare('SELECT * FROM courses WHERE slug=?').get(req.params.slug)); if(!c) return res.status(404).json({error:'Course not found'});
+ const lessons=await (db.prepare(`SELECT l.id,l.slug,l.title,l.summary,l.level,l.objectives,l.example,l.practice_prompt practicePrompt,l.order_no orderNo,l.xp,COALESCE(p.completed,0) completed,COALESCE(p.bookmarked,0) bookmarked FROM lessons l LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? WHERE l.course_id=? ORDER BY l.order_no`).all(req.user.id,c.id));
  res.json({course:c,lessons});
 });
-app.get('/api/lessons/:slug', authRequired, (req,res)=>{
- const l=db.prepare(`SELECT l.*,l.practice_prompt practicePrompt,c.slug courseSlug,c.title courseTitle,COALESCE(p.completed,0) completed,COALESCE(p.bookmarked,0) bookmarked FROM lessons l JOIN courses c ON c.id=l.course_id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? WHERE l.slug=?`).get(req.user.id,req.params.slug);
+app.get('/api/lessons/:slug', authRequired, async (req,res)=>{
+ const l=await (db.prepare(`SELECT l.*,l.practice_prompt practicePrompt,c.slug courseSlug,c.title courseTitle,COALESCE(p.completed,0) completed,COALESCE(p.bookmarked,0) bookmarked FROM lessons l JOIN courses c ON c.id=l.course_id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? WHERE l.slug=?`).get(req.user.id,req.params.slug));
  if(!l) return res.status(404).json({error:'Lesson not found'}); res.json({lesson:l});
 });
-app.get('/api/lessons/:slug/projects', authRequired, (req,res)=>{
- const lesson=db.prepare('SELECT id FROM lessons WHERE slug=?').get(req.params.slug);
+app.get('/api/lessons/:slug/projects', authRequired, async (req,res)=>{
+ const lesson=await (db.prepare('SELECT id FROM lessons WHERE slug=?').get(req.params.slug));
  if(!lesson) return res.status(404).json({error:'Lesson not found'});
- const projects=db.prepare('SELECT id,title,difficulty,description,requirements,order_no orderNo FROM lesson_projects WHERE lesson_id=? ORDER BY order_no').all(lesson.id);
+ const projects=await (db.prepare('SELECT id,title,difficulty,description,requirements,order_no orderNo FROM lesson_projects WHERE lesson_id=? ORDER BY order_no').all(lesson.id));
  res.json({projects});
 });
-app.post('/api/lessons/:id/progress', authRequired, (req,res)=>{
+app.post('/api/lessons/:id/progress', authRequired, async (req,res)=>{
  const id=Number(req.params.id); if(!Number.isInteger(id)) return res.status(400).json({error:'Invalid lesson'});
- const lesson=db.prepare('SELECT * FROM lessons WHERE id=?').get(id); if(!lesson) return res.status(404).json({error:'Lesson not found'});
- const current=db.prepare('SELECT completed FROM progress WHERE user_id=? AND lesson_id=?').get(req.user.id,id);
- db.prepare(`INSERT INTO progress(user_id,lesson_id,completed,updated_at) VALUES(?,?,1,CURRENT_TIMESTAMP) ON CONFLICT(user_id,lesson_id) DO UPDATE SET completed=1,updated_at=CURRENT_TIMESTAMP`).run(req.user.id,id);
- if(!current?.completed){ db.prepare('UPDATE users SET xp=xp+? WHERE id=?').run(lesson.xp,req.user.id); logActivity(req.user.id,'lesson',`Completed ${lesson.title}`,lesson.xp); }
+ const result=await db.transaction(async tx=>{
+  const [lesson]=await tx.query('SELECT * FROM lessons WHERE id=$1',[id]);
+  if(!lesson) return {notFound:true};
+  const completed=await tx.query(
+   `INSERT INTO progress(user_id,lesson_id,completed,updated_at) VALUES($1,$2,1,CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id,lesson_id) DO UPDATE SET completed=1,updated_at=CURRENT_TIMESTAMP
+    WHERE progress.completed=0 RETURNING lesson_id`,
+   [req.user.id,id]
+  );
+  if(completed.length){
+   await tx.query('UPDATE users SET xp=xp+$1 WHERE id=$2',[lesson.xp,req.user.id]);
+   await tx.query('INSERT INTO activity(user_id,type,label,xp) VALUES($1,$2,$3,$4)',[req.user.id,'lesson',`Completed ${lesson.title}`,lesson.xp]);
+  }
+  return {ok:true};
+ });
+ if(result.notFound) return res.status(404).json({error:'Lesson not found'});
  res.json({ok:true});
 });
-app.post('/api/lessons/:id/bookmark', authRequired, (req,res)=>{
- const id=Number(req.params.id); const lesson=db.prepare('SELECT id FROM lessons WHERE id=?').get(id); if(!lesson) return res.status(404).json({error:'Lesson not found'});
- const existing=db.prepare('SELECT bookmarked FROM progress WHERE user_id=? AND lesson_id=?').get(req.user.id,id); const next=existing?.bookmarked?0:1;
- db.prepare(`INSERT INTO progress(user_id,lesson_id,bookmarked) VALUES(?,?,?) ON CONFLICT(user_id,lesson_id) DO UPDATE SET bookmarked=excluded.bookmarked,updated_at=CURRENT_TIMESTAMP`).run(req.user.id,id,next); res.json({bookmarked:Boolean(next)});
+app.post('/api/lessons/:id/bookmark', authRequired, async (req,res)=>{
+ const id=Number(req.params.id); const lesson=await (db.prepare('SELECT id FROM lessons WHERE id=?').get(id)); if(!lesson) return res.status(404).json({error:'Lesson not found'});
+ const existing=await (db.prepare('SELECT bookmarked FROM progress WHERE user_id=? AND lesson_id=?').get(req.user.id,id)); const next=existing?.bookmarked?0:1;
+ await (db.prepare(`INSERT INTO progress(user_id,lesson_id,bookmarked) VALUES(?,?,?) ON CONFLICT(user_id,lesson_id) DO UPDATE SET bookmarked=excluded.bookmarked,updated_at=CURRENT_TIMESTAMP`).run(req.user.id,id,next)); res.json({bookmarked:Boolean(next)});
 });
-app.get('/api/practice', authRequired, (req,res)=>{
- const rows=db.prepare(`SELECT ch.*,c.slug courseSlug,c.title courseTitle,COALESCE(a.solved,0) solved,COALESCE(a.attempts,0) attempts FROM challenges ch JOIN courses c ON c.id=ch.course_id LEFT JOIN challenge_attempts a ON a.challenge_id=ch.id AND a.user_id=? ORDER BY ch.id`).all(req.user.id).map(row=>({...row,files:JSON.parse(row.files||'[]')}));
+app.get('/api/practice', authRequired, async (req,res)=>{
+ const rows=(await (db.prepare(`SELECT ch.*,c.slug courseSlug,c.title courseTitle,COALESCE(a.solved,0) solved,COALESCE(a.attempts,0) attempts FROM challenges ch JOIN courses c ON c.id=ch.course_id LEFT JOIN challenge_attempts a ON a.challenge_id=ch.id AND a.user_id=? ORDER BY ch.id`).all(req.user.id))).map(row=>({...row,files:JSON.parse(row.files||'[]')}));
  res.json({challenges:rows});
 });
 const practiceCodeSchema=z.object({code:z.string().max(20000),action:z.enum(['run','submit']).default('run')});
 const practicePreflightSchema=z.object({code:z.string().max(20000),language:z.string().max(40),question:z.string().max(500).optional()});
-const harmfulCodePattern=/\b(?:process\.|require\s*\(|import\s*\(|fetch\s*\(|XMLHttpRequest|WebSocket|document\.cookie|localStorage|sessionStorage|indexedDB|navigator\.sendBeacon|eval\s*\(|Function\s*\(|location\.(?:assign|replace)|window\.open)\b/i;
 function parseAiVerdict(answer) {
  const text=answer.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'').trim();
  try {
@@ -284,7 +324,7 @@ app.post('/api/practice/preflight', authRequired, tutorLimiter, async (req,res)=
  const parsed=practicePreflightSchema.safeParse(req.body);
  if(!parsed.success) return res.status(400).json({error:'Enter valid code before checking it.'});
  const {code,language,question}=parsed.data;
- if(harmfulCodePattern.test(code)) return res.json({safe:false,hasMistake:true,feedback:'This code uses a blocked operation and was not run.'});
+ if(containsUnsafeCode(code)) return res.json({safe:false,hasMistake:true,feedback:'This code uses a blocked operation and was not run.'});
  const system=`You are a careful coding safety and quality gate. Return JSON only with exactly {"safe":boolean,"hasMistake":boolean,"feedback":"short actionable explanation"}.
 safe must be false for network access, filesystem access, secrets, runtime escape, dynamic code execution, destructive operations, or code that is clearly unsafe.
 hasMistake must be true for syntax errors, unfinished placeholders, obvious runtime errors, or a solution that cannot reasonably run. Do not reject valid beginner code merely because it could be optimized. Never provide a complete replacement solution.`;
@@ -293,7 +333,7 @@ Question: ${question||'Open practice'}
 Student code:
 ${code}`;
  try {
-  const result=await callAI({provider:'gemini',system,message,maxOutputTokens:500});
+  const result=await callAI({provider:configuredAiProvider(),system,message,maxOutputTokens:500});
   const verdict=parsePreflightVerdict(result.answer);
   if(!verdict) throw Object.assign(new Error('AI returned an invalid preflight review.'),{statusCode:502});
   res.json(verdict);
@@ -303,7 +343,7 @@ ${code}`;
  }
 });
 async function validatePracticeCode(user,challenge,code) {
- if(harmfulCodePattern.test(code)) return {correct:false,harmful:true,feedback:'This code uses a blocked operation and was not run.'};
+ if(containsUnsafeCode(code)) return {correct:false,harmful:true,feedback:'This code uses a blocked operation and was not run.'};
  const system=`You are Learny AI Tutor validating a student coding challenge. Return JSON only, with exactly these fields: {"correct":boolean,"harmful":boolean,"feedback":"short explanation"}.
 Mark harmful true for code that accesses the network, filesystem, browser storage/cookies, process/runtime APIs, dynamic code execution, popups/navigation, or attempts to escape the browser sandbox. Mark correct true only when the code solves the challenge and produces the expected result. Do not reward placeholder code or explanations without working code.`;
  const message=`Challenge: ${challenge.title}
@@ -320,7 +360,7 @@ Student: ${user.display_name}.`,message});
  return verdict;
 }
 app.post('/api/practice/:id/validate', authRequired, tutorLimiter, async (req,res)=>{
- const id=Number(req.params.id); const challenge=db.prepare('SELECT ch.*,c.title courseTitle FROM challenges ch JOIN courses c ON c.id=ch.course_id WHERE ch.id=?').get(id);
+ const id=Number(req.params.id); const challenge=await (db.prepare('SELECT ch.*,c.title courseTitle FROM challenges ch JOIN courses c ON c.id=ch.course_id WHERE ch.id=?').get(id));
  if(!challenge) return res.status(404).json({error:'Challenge not found'});
  const parsed=practiceCodeSchema.safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Enter valid code before running it.'});
  try {
@@ -332,34 +372,53 @@ app.post('/api/practice/:id/validate', authRequired, tutorLimiter, async (req,re
  }
 });
 app.post('/api/practice/:id/attempt', authRequired, tutorLimiter, async (req,res)=>{
- const id=Number(req.params.id); const challenge=db.prepare('SELECT * FROM challenges WHERE id=?').get(id); if(!challenge) return res.status(404).json({error:'Challenge not found'});
+ const id=Number(req.params.id); const challenge=await (db.prepare('SELECT * FROM challenges WHERE id=?').get(id)); if(!challenge) return res.status(404).json({error:'Challenge not found'});
  const parsed=z.object({code:z.string().max(20000)}).safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Enter valid code before submitting.'});
  let verdict;
  try { verdict=await validatePracticeCode(req.user,challenge,parsed.data.code); }
  catch(e) { console.error('Practice submission validation error:',e); return res.status(e?.statusCode||502).json({error:'AI tutor could not validate this submission',details:e?.message||'Please try again.'}); }
- const old=db.prepare('SELECT attempts,solved FROM challenge_attempts WHERE user_id=? AND challenge_id=?').get(req.user.id,id); const solved=verdict.correct&&!verdict.harmful; const attempts=(old?.attempts||0)+1;
- db.prepare(`INSERT INTO challenge_attempts(user_id,challenge_id,solved,attempts,updated_at) VALUES(?,?,?, ?,CURRENT_TIMESTAMP) ON CONFLICT(user_id,challenge_id) DO UPDATE SET solved=MAX(solved,excluded.solved),attempts=excluded.attempts,updated_at=CURRENT_TIMESTAMP`).run(req.user.id,id,solved?1:0,attempts);
- if(solved && !old?.solved){db.prepare('UPDATE users SET xp=xp+30 WHERE id=?').run(req.user.id); logActivity(req.user.id,'practice',`Solved ${challenge.title}`,30);}
- res.json({solved:verdict.correct&&!verdict.harmful,attempts,correct:verdict.correct,harmful:verdict.harmful,feedback:verdict.feedback});
+ const result=await db.transaction(async tx=>{
+  await tx.query(
+   'INSERT INTO challenge_attempts(user_id,challenge_id) VALUES($1,$2) ON CONFLICT(user_id,challenge_id) DO NOTHING',
+   [req.user.id,id]
+  );
+  const [old]=await tx.query(
+   'SELECT attempts,solved FROM challenge_attempts WHERE user_id=$1 AND challenge_id=$2 FOR UPDATE',
+   [req.user.id,id]
+  );
+  const solved=verdict.correct&&!verdict.harmful;
+  const nextSolved=solved||Boolean(old.solved);
+  const attempts=old.attempts+1;
+  await tx.query(
+   'UPDATE challenge_attempts SET solved=$1,attempts=$2,updated_at=CURRENT_TIMESTAMP WHERE user_id=$3 AND challenge_id=$4',
+   [nextSolved?1:0,attempts,req.user.id,id]
+  );
+  if(solved&&!old.solved){
+   await tx.query('UPDATE users SET xp=xp+30 WHERE id=$1',[req.user.id]);
+   await tx.query('INSERT INTO activity(user_id,type,label,xp) VALUES($1,$2,$3,$4)',[req.user.id,'practice',`Solved ${challenge.title}`,30]);
+  }
+  return {solved:nextSolved,attempts};
+ });
+ res.json({solved:result.solved,attempts:result.attempts,correct:verdict.correct,harmful:verdict.harmful,feedback:verdict.feedback});
 });
 
 const tutorEventSchema = z.object({ eventType:z.enum(['session_start','session_end','editor_change','run','error','hint_request','page_view']), payload:z.record(z.string(), z.any()).optional().default({}) });
 const tutorAskSchema = z.object({ provider:z.enum(['gemini','openai']), mode:z.enum(['text','voice']), message:z.string().trim().min(1).max(4000), context:z.object({language:z.string().max(40).optional(),code:z.string().max(20000).optional(),error:z.string().max(3000).optional(),page:z.string().max(120).optional()}).optional().default({}) });
 
-app.post('/api/tutor/events', authRequired, tutorLimiter, (req,res)=>{
+app.post('/api/tutor/events', authRequired, tutorLimiter, async (req,res)=>{
  const parsed=tutorEventSchema.safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Invalid tutor event'});
  const payload=JSON.stringify(parsed.data.payload||{});
- db.prepare('INSERT INTO tutor_events(user_id,event_type,payload) VALUES(?,?,?)').run(req.user.id,parsed.data.eventType,payload);
- db.prepare("DELETE FROM tutor_events WHERE user_id=? AND id NOT IN (SELECT id FROM tutor_events WHERE user_id=? ORDER BY id DESC LIMIT 300)").run(req.user.id,req.user.id);
+ await (db.prepare('INSERT INTO tutor_events(user_id,event_type,payload) VALUES(?,?,?)').run(req.user.id,parsed.data.eventType,payload));
+ await (db.prepare("DELETE FROM tutor_events WHERE user_id=? AND id NOT IN (SELECT id FROM tutor_events WHERE user_id=? ORDER BY id DESC LIMIT 300)").run(req.user.id,req.user.id));
  res.status(204).end();
 });
-app.get('/api/tutor/overview', authRequired, (req,res)=>{
- const total=db.prepare('SELECT COUNT(*) c FROM lessons').get().c;
- const completed=db.prepare('SELECT COUNT(*) c FROM progress WHERE user_id=? AND completed=1').get(req.user.id).c;
- const challenges=db.prepare('SELECT COUNT(*) c FROM challenge_attempts WHERE user_id=?').get(req.user.id).c;
- const solved=db.prepare('SELECT COUNT(*) c FROM challenge_attempts WHERE user_id=? AND solved=1').get(req.user.id).c;
- const recent=db.prepare('SELECT event_type eventType,payload,created_at createdAt FROM tutor_events WHERE user_id=? ORDER BY id DESC LIMIT 30').all(req.user.id).map(x=>({...x,payload:JSON.parse(x.payload)}));
- const courses=db.prepare(`SELECT c.title,COUNT(l.id) lessons,SUM(CASE WHEN p.completed=1 THEN 1 ELSE 0 END) completed FROM courses c LEFT JOIN lessons l ON l.course_id=c.id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? GROUP BY c.id ORDER BY c.id`).all(req.user.id);
+app.get('/api/tutor/overview', authRequired, async (req,res)=>{
+ const total=(await (db.prepare('SELECT COUNT(*) c FROM lessons').get())).c;
+ const completed=(await (db.prepare('SELECT COUNT(*) c FROM progress WHERE user_id=? AND completed=1').get(req.user.id))).c;
+ const challenges=(await (db.prepare('SELECT COUNT(*) c FROM challenge_attempts WHERE user_id=?').get(req.user.id))).c;
+ const solved=(await (db.prepare('SELECT COUNT(*) c FROM challenge_attempts WHERE user_id=? AND solved=1').get(req.user.id))).c;
+ const recent=(await (db.prepare('SELECT event_type eventType,payload,created_at createdAt FROM tutor_events WHERE user_id=? ORDER BY id DESC LIMIT 30').all(req.user.id))).map(x=>({...x,payload:JSON.parse(x.payload)}));
+ const courses=await (db.prepare(`SELECT c.title,COUNT(l.id) lessons,SUM(CASE WHEN p.completed=1 THEN 1 ELSE 0 END) completed FROM courses c LEFT JOIN lessons l ON l.course_id=c.id LEFT JOIN progress p ON p.lesson_id=l.id AND p.user_id=? GROUP BY c.id ORDER BY c.id`).all(req.user.id));
  res.json({user:safeUser(req.user),progress:{totalLessons:total,completedLessons:completed,percent:total?Math.round(completed/total*100):0,challenges,solved},courses,recent});
 });
 const tutorActionSchema=z.object({
@@ -412,7 +471,7 @@ app.post('/api/tutor/ask', requireSameOrigin, authRequired, tutorLimiter, async 
  const {provider,mode,action,message,context}=parsed.data;
  const contextText=JSON.stringify(context||{});
  if(contextText.length>30000) return res.status(413).json({error:'Tutor context is too large. Remove some pasted code or conversation history and try again.'});
- const overview=db.prepare('SELECT COUNT(*) total, SUM(CASE WHEN completed=1 THEN 1 ELSE 0 END) completed FROM progress WHERE user_id=?').get(req.user.id);
+ const overview=await (db.prepare('SELECT COUNT(*) total, SUM(CASE WHEN completed=1 THEN 1 ELSE 0 END) completed FROM progress WHERE user_id=?').get(req.user.id));
  const actionInstruction={
   ask:"Answer the student's question clearly with a practical example.",
   explain:'Explain the requested topic from beginner to practical level. Use a tiny example and a short recap.',
@@ -443,7 +502,7 @@ The previous response was cut off by the output limit. Continue the exact same a
     answer+=result.answer;
    }
   }
-  db.prepare('INSERT INTO tutor_events(user_id,event_type,payload) VALUES(?,?,?)').run(req.user.id,'tutor_response',JSON.stringify({provider,mode,action,message,answer:answer.slice(0,6000)}));
+  await (db.prepare('INSERT INTO tutor_events(user_id,event_type,payload) VALUES(?,?,?)').run(req.user.id,'tutor_response',JSON.stringify({provider,mode,action,message,answer:answer.slice(0,6000)})));
   res.json({answer,provider,mode,action,model:result.model});
  }catch(e){
   console.error('Tutor provider error:',e);
@@ -452,17 +511,33 @@ The previous response was cut off by the output limit. Continue the exact same a
 });
 
 const noteSchema=z.object({title:z.string().trim().min(1).max(160),content:z.string().trim().min(1).max(30000),source:z.enum(['manual','ai']).default('manual')});
-app.get('/api/notes',authRequired,(req,res)=>{res.json({notes:db.prepare('SELECT id,title,content,source,created_at createdAt,updated_at updatedAt FROM notes WHERE user_id=? ORDER BY updated_at DESC,id DESC').all(req.user.id)})});
-app.post('/api/notes',authRequired,(req,res)=>{const p=noteSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid note'});const id=db.prepare('INSERT INTO notes(user_id,title,content,source) VALUES(?,?,?,?)').run(req.user.id,p.data.title,p.data.content,p.data.source).lastInsertRowid;res.status(201).json({note:db.prepare('SELECT id,title,content,source,created_at createdAt,updated_at updatedAt FROM notes WHERE id=?').get(id)})});
-app.patch('/api/notes/:id',authRequired,(req,res)=>{const id=Number(req.params.id);const p=noteSchema.partial().safeParse(req.body);if(!Number.isInteger(id)||!p.success)return res.status(400).json({error:'Invalid note'});const old=db.prepare('SELECT * FROM notes WHERE id=? AND user_id=?').get(id,req.user.id);if(!old)return res.status(404).json({error:'Note not found'});db.prepare('UPDATE notes SET title=?,content=?,source=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?').run(p.data.title??old.title,p.data.content??old.content,p.data.source??old.source,id,req.user.id);res.json({note:db.prepare('SELECT id,title,content,source,created_at createdAt,updated_at updatedAt FROM notes WHERE id=?').get(id)})});
-app.delete('/api/notes/:id',authRequired,(req,res)=>{const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Invalid note'});db.prepare('DELETE FROM notes WHERE id=? AND user_id=?').run(id,req.user.id);res.status(204).end()});
+app.get('/api/notes',authRequired,async (req,res)=>{res.json({notes:await (db.prepare('SELECT id,title,content,source,created_at createdAt,updated_at updatedAt FROM notes WHERE user_id=? ORDER BY updated_at DESC,id DESC').all(req.user.id))})});
+app.post('/api/notes',authRequired,async (req,res)=>{const p=noteSchema.safeParse(req.body);if(!p.success)return res.status(400).json({error:'Invalid note'});const id=(await (db.prepare('INSERT INTO notes(user_id,title,content,source) VALUES(?,?,?,?)').run(req.user.id,p.data.title,p.data.content,p.data.source))).lastInsertRowid;res.status(201).json({note:await (db.prepare('SELECT id,title,content,source,created_at createdAt,updated_at updatedAt FROM notes WHERE id=?').get(id))})});
+app.patch('/api/notes/:id',authRequired,async (req,res)=>{const id=Number(req.params.id);const p=noteSchema.partial().safeParse(req.body);if(!Number.isInteger(id)||!p.success)return res.status(400).json({error:'Invalid note'});const old=await (db.prepare('SELECT * FROM notes WHERE id=? AND user_id=?').get(id,req.user.id));if(!old)return res.status(404).json({error:'Note not found'});await (db.prepare('UPDATE notes SET title=?,content=?,source=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?').run(p.data.title??old.title,p.data.content??old.content,p.data.source??old.source,id,req.user.id));res.json({note:await (db.prepare('SELECT id,title,content,source,created_at createdAt,updated_at updatedAt FROM notes WHERE id=?').get(id))})});
+app.delete('/api/notes/:id',authRequired,async (req,res)=>{const id=Number(req.params.id);if(!Number.isInteger(id))return res.status(400).json({error:'Invalid note'});await (db.prepare('DELETE FROM notes WHERE id=? AND user_id=?').run(id,req.user.id));res.status(204).end()});
 
-app.get('/api/profile', authRequired,(req,res)=>res.json({user:safeUser(req.user),bookmarks:db.prepare(`SELECT l.slug,l.title,c.title courseTitle FROM progress p JOIN lessons l ON l.id=p.lesson_id JOIN courses c ON c.id=l.course_id WHERE p.user_id=? AND p.bookmarked=1 ORDER BY p.updated_at DESC`).all(req.user.id)}));
-app.patch('/api/settings',requireSameOrigin,authRequired,(req,res)=>{
- const parsed=themeSchema.safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Invalid setting'}); db.prepare('UPDATE users SET theme=? WHERE id=?').run(parsed.data.theme,req.user.id); const u=db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id); res.json({user:safeUser(u)});
+app.get('/api/profile', authRequired,async (req,res)=>res.json({user:safeUser(req.user),bookmarks:await (db.prepare(`SELECT l.slug,l.title,c.title courseTitle FROM progress p JOIN lessons l ON l.id=p.lesson_id JOIN courses c ON c.id=l.course_id WHERE p.user_id=? AND p.bookmarked=1 ORDER BY p.updated_at DESC`).all(req.user.id))}));
+app.patch('/api/settings',requireSameOrigin,authRequired,async (req,res)=>{
+ const parsed=themeSchema.safeParse(req.body); if(!parsed.success) return res.status(400).json({error:'Invalid setting'}); await (db.prepare('UPDATE users SET theme=? WHERE id=?').run(parsed.data.theme,req.user.id)); const u=await (db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id)); res.json({user:safeUser(u)});
 });
 
 const __filename=fileURLToPath(import.meta.url); const __dirname=path.dirname(__filename); const clientDist=path.join(__dirname,'../../client/dist');
-if(isProd){ app.use(express.static(clientDist)); app.use((req,res,next)=>{if(req.path.startsWith('/api/')) return next(); res.sendFile(path.join(clientDist,'index.html'));}); }
+if(isProd && !isVercel){ app.use(express.static(clientDist)); app.use((req,res,next)=>{if(req.path.startsWith('/api/')) return next(); res.sendFile(path.join(clientDist,'index.html'));}); }
 app.use((err,_req,res,_next)=>{ console.error(err); res.status(500).json({error:'Unexpected server error'}); });
-const port=Number(process.env.PORT||4000); const host='127.0.0.1'; app.listen(port,host,()=>console.log(`Learny API listening on http://${host}:${port}`));
+export async function handler(req,res) {
+ try {
+  await initDb();
+  return app(req,res);
+ } catch (error) {
+  console.error('API initialization failed:',error);
+  return res.status(503).json({error:'Database is unavailable. Check the managed PostgreSQL configuration.'});
+ }
+}
+export { app };
+export default handler;
+
+if(!isVercel){
+ await initDb();
+ const port=Number(process.env.PORT||4000); const host='127.0.0.1';
+ app.listen(port,host,()=>console.log(`Learny API listening on http://${host}:${port}`));
+}

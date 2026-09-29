@@ -23,13 +23,14 @@ export function verifyPassword(p, h) {
  return bcrypt.compare(p, h);
 }
 function expiry(days) {
- const d = new Date(Date.now() + days * 86400000);
- return d.toISOString().slice(0,19).replace('T',' ');
+ return new Date(Date.now() + days * 86400000);
 }
-function issueToken(userId, type, days) {
+async function issueToken(userId, type, days) {
  const raw = randomToken();
- db.prepare(`INSERT INTO auth_tokens(user_id,token_hash,type,expires_at) VALUES(?,?,?,?)`)
-   .run(userId, hashToken(raw), type, expiry(days));
+ await db.query(
+  'INSERT INTO auth_tokens(user_id,token_hash,type,expires_at) VALUES($1,$2,$3,$4)',
+  [userId, hashToken(raw), type, expiry(days)]
+ );
  return raw;
 }
 export function createSession(userId) { return issueToken(userId, 'session', SESSION_DAYS); }
@@ -42,32 +43,32 @@ export function setAuthCookie(res, token) {
 export function clearAuthCookie(res) {
  res.clearCookie('learny_session', cookieBase);
 }
-export function consumeToken(raw, type) {
+export async function consumeToken(raw, type) {
  if (!raw) return null;
- const row = db.prepare(`
+ const rows = await db.query(`
    SELECT * FROM auth_tokens
-   WHERE token_hash=? AND type=? AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP
- `).get(hashToken(raw), type);
- return row || null;
+   WHERE token_hash=$1 AND type=$2 AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP
+ `, [hashToken(raw), type]);
+ return rows[0] || null;
 }
-export function markTokenUsed(id) {
- db.prepare('UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+export async function markTokenUsed(id) {
+ await db.query('UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE id=$1', [id]);
 }
-export function revokeUserSessions(userId) {
- db.prepare("UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE user_id=? AND type='session' AND used_at IS NULL").run(userId);
+export async function revokeUserSessions(userId) {
+ await db.query("UPDATE auth_tokens SET used_at=CURRENT_TIMESTAMP WHERE user_id=$1 AND type='session' AND used_at IS NULL", [userId]);
 }
-export function authRequired(req,res,next) {
+export async function authRequired(req,res,next) {
  try {
   const raw = req.cookies.learny_session;
-  const token = consumeToken(raw, 'session');
+  const token = await consumeToken(raw, 'session');
   if (!token) return res.status(401).json({error:'Authentication required'});
-  const user = db.prepare('SELECT id,username,email,display_name,avatar_color,xp,streak,theme,created_at,email_verified,auth_provider FROM users WHERE id=?').get(token.user_id);
+  const [user] = await db.query('SELECT id,username,email,display_name,avatar_color,xp,streak,theme,created_at,email_verified,auth_provider FROM users WHERE id=$1', [token.user_id]);
   if (!user) return res.status(401).json({error:'Session is invalid'});
   req.user = user;
   req.sessionTokenId = token.id;
   next();
- } catch {
-  return res.status(401).json({error:'Session is invalid or expired'});
+ } catch (error) {
+  next(error);
  }
 }
 export function safeAuthUser(row) {

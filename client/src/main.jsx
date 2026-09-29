@@ -1439,15 +1439,27 @@ function WorkspaceEditor({
         }),
         signal: ac.signal,
       });
-      setOutput(
+      const runOutput =
         [r.stdout, r.stderr]
           .filter(Boolean)
           .join(r.stdout && r.stderr ? "\n" : "") ||
-          "Process completed without output.",
+        (r.simulated ? "No output was predicted." : "Process completed without output.");
+      setOutput(
+        r.simulated
+          ? `${r.simulationLabel || "AI-predicted output — not executed"}\n${runOutput}${r.explanation ? `\n\n${r.explanation}` : ""}`
+          : runOutput,
       );
       setShowPreview(false);
       setStatus(
-        r.timedOut ? "Timed out" : r.exitCode === 0 ? "Finished" : "Failed",
+        r.blocked
+          ? "Blocked by AI review"
+          : r.simulated
+            ? "AI prediction (not run)"
+            : r.timedOut
+              ? "Timed out"
+              : r.exitCode === 0
+                ? "Finished"
+                : "Failed",
       );
     } catch (e) {
       if (e.name !== "AbortError") {

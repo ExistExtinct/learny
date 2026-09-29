@@ -1,11 +1,13 @@
 {
   "name":"learny",
   "private":true,
+  "type": "module",
   "version":"2.0.0",
   "scripts":{
     "install:all":"npm install --prefix server && npm install --prefix client",
     "dev":"node scripts/dev.mjs",
     "build":"npm run build --prefix client",
+    "vercel-build":"npm run build",
     "start":"npm run start --prefix server",
     "test":"npm run test --prefix server && npm run build --prefix client"
   },
